@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+
+import os
+import xacro
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, SetEnvironmentVariable, TimerAction, IncludeLaunchDescription
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+
+
+def generate_launch_description():
+    # Paths and configurations
+    package_share_dir = get_package_share_directory('pyroguard')
+    world_path = os.path.join(package_share_dir, 'worlds', 'forest.sdf')
+    
+    # Keep the original path as backup in case the package world doesn't exist
+    fallback_world_path = '/home/adji714/custom_gazebo_worlds/forest/forest.world'
+    fallback_world_dir = '/home/adji714/custom_gazebo_worlds/forest'
+    
+    # Use package world if it exists, otherwise fallback to original
+    if os.path.exists(world_path):
+        custom_gazebo_world_path = world_path
+        custom_gazebo_dir = os.path.join(package_share_dir, 'worlds')
+    else:
+        custom_gazebo_world_path = fallback_world_path
+        custom_gazebo_dir = fallback_world_dir
+    
+    # Launch arguments
+    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    model = LaunchConfiguration('model', default='standard')  # Force standard model with camera
+    x_pose = LaunchConfiguration('x_pose', default='0.0')
+    y_pose = LaunchConfiguration('y_pose', default='0.0')
+    z_pose = LaunchConfiguration('z_pose', default='0.1')
+    yaw = LaunchConfiguration('yaw', default='0.0')
+    
+    # Environment variables for plugin compatibility
+    ros_share_path = '/opt/ros/humble/share'
+    current_ign_path = os.environ.get('IGN_GAZEBO_RESOURCE_PATH', '')
+    original_forest_dir = '/home/adji714/custom_gazebo_worlds/forest'
+    
+    # Include original forest directory for textures and DAE files
+    ign_gazebo_resource_path_env = SetEnvironmentVariable(
+        'IGN_GAZEBO_RESOURCE_PATH',
+        f"{custom_gazebo_dir}:{original_forest_dir}:{ros_share_path}:{current_ign_path}"
+    )
+    
+    # Set correct plugin paths for ros_gz_bridge compatibility
+    ign_gazebo_system_plugin_path_env = SetEnvironmentVariable(
+        'IGN_GAZEBO_SYSTEM_PLUGIN_PATH',
+        '/usr/lib/x86_64-linux-gnu/ign-gazebo-6/plugins:/opt/ros/humble/lib/x86_64-linux-gnu:/opt/ros/humble/lib'
+    )
+    
+    ldn_library_path_env = SetEnvironmentVariable(
+        'LD_LIBRARY_PATH',
+        '/opt/ros/humble/lib:/opt/ros/humble/lib/x86_64-linux-gnu'
+    )
+    
+    gz_plugin_path_env = SetEnvironmentVariable(
+        'GZ_SIM_SYSTEM_PLUGIN_PATH',
+        '/opt/ros/humble/lib/x86_64-linux-gnu:/opt/ros/humble/lib'
+    )
+    
+    # Force use of FastRTPS to avoid SHM errors
+    rmw_implementation_env = SetEnvironmentVariable(
+        'RMW_IMPLEMENTATION',
+        'rmw_fastrtps_cpp'
+    )
+    
+    # Launch arguments declarations
+    declare_use_sim_time_cmd = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='true',
+        description='Use simulation (Gazebo) clock if true'
+    )
+    
+    declare_model_cmd = DeclareLaunchArgument(
+        'model',
+        default_value='standard',
+        choices=['standard', 'lite'],
+        description='TurtleBot4 model: standard (with OAK-D camera) or lite (no camera)'
+    )
+    
+    declare_x_position_cmd = DeclareLaunchArgument(
+        'x_pose',
+        default_value='0.0',
+        description='Initial x position of the robot'
+    )
+    
+    declare_y_position_cmd = DeclareLaunchArgument(
+        'y_pose',
+        default_value='0.0',
+        description='Initial y position of the robot'
+    )
+    
+    declare_z_position_cmd = DeclareLaunchArgument(
+        'z_pose',
+        default_value='0.1',
+        description='Initial z position of the robot'
+    )
+    
+    declare_yaw_cmd = DeclareLaunchArgument(
+        'yaw',
+        default_value='0.0',
+        description='Initial yaw orientation of the robot'
+    )
+    
+    # Use TurtleBot4 ignition bringup launch with our custom world
+    world_name = 'forest'  # Will become forest.sdf
+    
+    # Debug output
+    print("🔥 TurtleBot4 Forest World Launcher (Custom Spawn) - DIAGNOSTIC MODE! 🔥")
+    print("=" * 70)
+    print(f"🌲 Loading world: {world_name}")
+    print(f"🔥 Fire management enabled - use fire_utils.py to manage fires")
+    print(f"🤖 Robot will spawn at (0.0, 0.0, 0.1) after 8 seconds with STANDARD model (includes camera)")
+    print(f"🎮 CUSTOM SPAWN: Bypasses problematic ROS2 control spawner!")
+    print(f"📡 LiDAR bridge will auto-start at 10 seconds")
+    print(f"📷 Camera bridge will auto-start: /test_camera topic available after 16 seconds")
+    print(f"🎮 Teleop keyboard with FULL DIAGNOSTICS at 25 seconds")
+    print(f"🔧 MANUAL TEST: ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \"{{linear: {{x: 0.5}}}}\" --once")
+    print(f"� MANUAL TEST: ros2 topic pub /model/turtlebot4/cmd_vel geometry_msgs/msg/Twist \"{{linear: {{x: 0.5}}}}\" --once")
+    print(f"🚀 DIAGNOSTIC: Wait 25 seconds, watch for movement during auto-tests!")
+    print("=" * 70)
+    
+    # Launch just the world without any robot spawning
+    turtlebot4_world_launch = ExecuteProcess(
+        cmd=['ign', 'gazebo', '-r', '/opt/ros/humble/share/turtlebot4_ignition_bringup/worlds/forest.sdf'],
+        output='screen'
+    )
+    
+    # Clock bridge for sim time
+    clock_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='clock_bridge',
+        arguments=['/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
+        output='screen'
+    )
+    
+    # Custom TurtleBot4 spawn - bypass problematic built-in spawner
+    turtlebot4_spawn_launch = TimerAction(
+        period=8.0,
+        actions=[
+            ExecuteProcess(
+                cmd=['echo', '🤖 DEBUG: Starting CUSTOM robot spawn at 8 seconds (bypassing built-in spawner)...'],
+                output='screen'
+            ),
+            # Robot description - use direct robot_state_publisher with processed URDF
+            Node(
+                package='robot_state_publisher',
+                executable='robot_state_publisher',
+                name='robot_state_publisher',
+                output='screen',
+                parameters=[{
+                    'robot_description': xacro.process_file('/opt/ros/humble/share/turtlebot4_description/urdf/standard/turtlebot4.urdf.xacro').toxml(),
+                    'use_sim_time': use_sim_time,
+                }],
+            ),
+            # Direct robot spawning without ROS2 control spawner
+            Node(
+                package='ros_gz_sim',
+                executable='create',
+                name='spawn_turtlebot4',
+                arguments=[
+                    '-name', 'turtlebot4',
+                    '-x', x_pose,
+                    '-y', y_pose, 
+                    '-z', z_pose,
+                    '-Y', yaw,
+                    '-topic', 'robot_description'
+                ],
+                output='screen'
+            ),
+            # Essential bridges only (skip the problematic controller spawner)
+            Node(
+                package='ros_gz_bridge',
+                executable='parameter_bridge',
+                name='essential_cmd_vel_bridge',
+                arguments=[
+                    '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'
+                ],
+                output='screen'
+            ),
+            # Model-specific cmd_vel bridge for TurtleBot4
+            Node(
+                package='ros_gz_bridge',
+                executable='parameter_bridge',
+                name='model_cmd_vel_bridge',
+                arguments=[
+                    '/model/turtlebot4/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'
+                ],
+                output='screen'
+            ),
+        ]
+    )
+    
+    # Robot already has direct DiffDrive control - no additional spawners needed
+    # The TurtleBot4 uses built-in Ignition DiffDrive plugin, not ROS2 control
+    
+    # Additional bridges for enhanced functionality
+    lidar_bridge_node = TimerAction(
+        period=10.0,
+        actions=[
+            ExecuteProcess(
+                cmd=['echo', '� DEBUG: Starting LiDAR bridge at 10 seconds...'],
+                output='screen'
+            ),
+            Node(
+                package='ros_gz_bridge',
+                executable='parameter_bridge',
+                name='lidar_bridge',
+                arguments=[
+                    '/world/forest_world/model/turtlebot4/link/rplidar_link/sensor/rplidar/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan'
+                ],
+                output='screen'
+            )
+        ]
+    )
+    
+    # Camera bridge node - automatically bridge camera topic for easy access
+    camera_bridge_node = TimerAction(
+        period=16.0,
+        actions=[
+            ExecuteProcess(
+                cmd=['echo', '📷 DEBUG: Starting camera bridge at 16 seconds...'],
+                output='screen'
+            ),
+            Node(
+                package='ros_gz_bridge',
+                executable='parameter_bridge',
+                name='camera_bridge_manual',
+                arguments=[
+                    '/camera@sensor_msgs/msg/Image[gz.msgs.Image',
+                    '--ros-args', '-r', '/camera:=/test_camera'
+                ],
+                output='screen'
+            )
+        ]
+    )
+
+    # Teleop keyboard control - starts after full system initialization (SINGLE INSTANCE)
+    teleop_node = TimerAction(
+        period=25.0,  # Increased delay to ensure all systems are ready
+        actions=[
+            ExecuteProcess(
+                cmd=['echo', '⏳ SYSTEM CHECK: Verifying robot is ready for teleop control...'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['echo', '🎮 DEBUG: Starting teleop keyboard at 25 seconds (after full initialization)...'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['echo', ''],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['echo', '🎮 TELEOP READY! Use WASD keys to control the robot:'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['echo', '   W/S: Forward/Backward  |  A/D: Turn Left/Right  |  X: Stop'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['echo', '   Q/E: Increase/Decrease speeds  |  Ctrl+C: Exit teleop'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['echo', '   NOTE: Only ONE teleop instance should run - kill others if robot slides!'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['echo', '   WAIT: Robot movement should work now - all bridges initialized!'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['echo', ''],
+                output='screen'
+            ),
+            # Pre-check: Send a test stop command to verify bridge connectivity
+            ExecuteProcess(
+                cmd=['ros2', 'topic', 'pub', '/cmd_vel', 'geometry_msgs/msg/Twist', '{}', '--once'],
+                output='screen'
+            ),
+            # Test both cmd_vel topics to see which one works
+            ExecuteProcess(
+                cmd=['echo', '🔧 TESTING: Sending test command to /cmd_vel...'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['ros2', 'topic', 'pub', '/cmd_vel', 'geometry_msgs/msg/Twist', '{linear: {x: 0.1}}', '--once'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['echo', '🔧 TESTING: Sending test command to /model/turtlebot4/cmd_vel...'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['ros2', 'topic', 'pub', '/model/turtlebot4/cmd_vel', 'geometry_msgs/msg/Twist', '{linear: {x: 0.1}}', '--once'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['echo', '🔧 TESTING: Stopping robot after tests...'],
+                output='screen'
+            ),
+            ExecuteProcess(
+                cmd=['ros2', 'topic', 'pub', '/cmd_vel', 'geometry_msgs/msg/Twist', '{}', '--once'],
+                output='screen'
+            ),
+            # Single teleop instance with comprehensive debugging
+            ExecuteProcess(
+                cmd=['gnome-terminal', '--', 'bash', '-c', 
+                     '''
+                     sleep 3 && source /opt/ros/humble/setup.bash
+                     echo "� COMPREHENSIVE TELEOP DIAGNOSTIC"
+                     echo "================================="
+                     echo "📋 Available topics:"
+                     ros2 topic list | grep cmd_vel
+                     echo ""
+                     echo "📊 Topic info for /cmd_vel:"
+                     ros2 topic info /cmd_vel --verbose
+                     echo ""
+                     echo "� Topic info for /model/turtlebot4/cmd_vel:"
+                     ros2 topic info /model/turtlebot4/cmd_vel --verbose
+                     echo ""
+                     echo "🧪 Testing manual command to /cmd_vel:"
+                     ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}}" --once
+                     sleep 2
+                     echo "🧪 Testing manual command to /model/turtlebot4/cmd_vel:"
+                     ros2 topic pub /model/turtlebot4/cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}}" --once
+                     sleep 2
+                     echo "🛑 Stopping robot:"
+                     ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{}" --once
+                     ros2 topic pub /model/turtlebot4/cmd_vel geometry_msgs/msg/Twist "{}" --once
+                     echo ""
+                     echo "🎮 Starting teleop on /cmd_vel (press ENTER after testing):"
+                     echo "   Try W/A/S/D keys. If no movement, press Ctrl+C and restart"
+                     ros2 run teleop_twist_keyboard teleop_twist_keyboard
+                     '''],
+                output='screen'
+            )
+        ]
+    )
+
+    return LaunchDescription([
+        # Environment variables
+        ign_gazebo_resource_path_env,
+        ign_gazebo_system_plugin_path_env,
+        ldn_library_path_env,
+        gz_plugin_path_env,
+        rmw_implementation_env,
+        
+        # Launch arguments
+        declare_use_sim_time_cmd,
+        declare_model_cmd,
+        declare_x_position_cmd,
+        declare_y_position_cmd,
+        declare_z_position_cmd,
+        declare_yaw_cmd,
+        
+        # Launch sequence: World -> Custom Robot Spawn -> LiDAR -> Camera -> Teleop (bypassing problematic spawners)
+        turtlebot4_world_launch,
+        clock_bridge,
+        turtlebot4_spawn_launch,
+        lidar_bridge_node,
+        camera_bridge_node,
+        teleop_node,
+    ])

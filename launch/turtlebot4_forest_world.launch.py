@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+
+import os
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDe    print(f"🚀 Quick start: Wait 12 seconds for camera, then robot is ready for commands")cription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, SetEnvironmentVariable, TimerAction, IncludeLaunchDescription
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+from launch.substitutions import Command
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+
+
+def generate_launch_description():
+    # Paths and configurations
+    package_share_dir = get_package_share_directory('pyroguard')
+    world_path = os.path.join(package_share_dir, 'worlds', 'forest.sdf')
+    
+    # Keep the original path as backup in case the package world doesn't exist
+    fallback_world_path = '/home/adji714/custom_gazebo_worlds/forest/forest.world'
+    fallback_world_dir = '/home/adji714/custom_gazebo_worlds/forest'
+    
+    # Use package world if it exists, otherwise fallback to original
+    if os.path.exists(world_path):
+        custom_gazebo_world_path = world_path
+        custom_gazebo_dir = os.path.join(package_share_dir, 'worlds')
+    else:
+        custom_gazebo_world_path = fallback_world_path
+        custom_gazebo_dir = fallback_world_dir
+    
+    # Launch arguments
+    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    model = LaunchConfiguration('model', default='standard')  # Force standard model with camera
+    x_pose = LaunchConfiguration('x_pose', default='0.0')  # Center position for visibility
+    y_pose = LaunchConfiguration('y_pose', default='0.0')  # Center position for visibility
+    z_pose = LaunchConfiguration('z_pose', default='0.3')
+    yaw = LaunchConfiguration('yaw', default='0.0')
+    
+    # Environment variables (following run_forest.sh pattern)
+    # Add ROS package paths to Gazebo resource path for mesh loading
+    ros_share_path = '/opt/ros/humble/share'
+    current_ign_path = os.environ.get('IGN_GAZEBO_RESOURCE_PATH', '')
+    original_forest_dir = '/home/adji714/custom_gazebo_worlds/forest'
+    
+    # Include original forest directory for textures and DAE files
+    ign_gazebo_resource_path_env = SetEnvironmentVariable(
+        'IGN_GAZEBO_RESOURCE_PATH',
+        f"{custom_gazebo_dir}:{original_forest_dir}:{ros_share_path}:{current_ign_path}"
+    )
+    
+    # Fix ros_ign_bridge plugin loading issues in ROS2 Humble
+    # Set correct plugin paths for new ros_gz_bridge libraries  
+    # Override with system ignition plugins to avoid ros_ign_bridge errors
+    ign_gazebo_system_plugin_path_env = SetEnvironmentVariable(
+        'IGN_GAZEBO_SYSTEM_PLUGIN_PATH',
+        '/usr/lib/x86_64-linux-gnu/ign-gazebo-6/plugins:/opt/ros/humble/lib/x86_64-linux-gnu:/opt/ros/humble/lib'
+    )
+    
+    # Also set the legacy environment variable for compatibility
+    ldn_library_path_env = SetEnvironmentVariable(
+        'LD_LIBRARY_PATH',
+        '/opt/ros/humble/lib:/opt/ros/humble/lib/x86_64-linux-gnu'
+    )
+    
+    # Add Gazebo plugin paths for ros_gz compatibility
+    gz_plugin_path_env = SetEnvironmentVariable(
+        'GZ_SIM_SYSTEM_PLUGIN_PATH',
+        '/opt/ros/humble/lib/x86_64-linux-gnu:/opt/ros/humble/lib'
+    )
+    
+    # Force use of FastRTPS to avoid SHM errors and ensure better compatibility
+    rmw_implementation_env = SetEnvironmentVariable(
+        'RMW_IMPLEMENTATION',
+        'rmw_fastrtps_cpp'
+    )
+    
+    # Launch arguments declarations
+    declare_use_sim_time_cmd = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='true',
+        description='Use simulation (Gazebo) clock if true'
+    )
+    
+    declare_model_cmd = DeclareLaunchArgument(
+        'model',
+        default_value='standard',
+        choices=['standard', 'lite'],
+        description='TurtleBot4 model: standard (with OAK-D camera) or lite (no camera)'
+    )
+    
+    declare_x_position_cmd = DeclareLaunchArgument(
+        'x_pose',
+        default_value='0.0',
+        description='Initial x position of the robot (center for visibility)'
+    )
+    
+    declare_y_position_cmd = DeclareLaunchArgument(
+        'y_pose',
+        default_value='0.0',
+        description='Initial y position of the robot (center for visibility)'
+    )
+    
+    declare_z_position_cmd = DeclareLaunchArgument(
+        'z_pose',
+        default_value='0.1',
+        description='Initial z position of the robot (lowered for better ground contact)'
+    )
+    
+    declare_yaw_cmd = DeclareLaunchArgument(
+        'yaw',
+        default_value='0.0',
+        description='Initial yaw orientation of the robot'
+    )
+    
+    # Use TurtleBot4 ignition bringup launch with our custom world
+    # Note: TurtleBot4 launch automatically appends .sdf, so we pass just the base name
+    world_name = 'forest'  # Will become forest.sdf
+    
+    # Debug output
+    print(f"🌲 Loading world: {world_name}")
+    print(f"🔥 Fire management enabled - use fire_utils.py to manage fires")
+    print(f"🤖 Robot will spawn at (0.0, 0.0, 0.1) after 8 seconds with STANDARD model (includes camera)")
+    print(f"📹 In Gazebo GUI: Use View -> Show/Hide to toggle robot visibility if needed")
+    print(f"⚙️  FORCING model='standard' (overriding default 'lite' from ignition.launch.py)")
+    print(f"📷 Camera bridge will auto-start: /test_camera topic available after 12 seconds")
+    print(f"🎮 Manual control: Use 'ros2 topic pub /cmd_vel geometry_msgs/msg/Twist' or Gazebo GUI")
+    print(f"🔧 Setting IGN_GAZEBO_SYSTEM_PLUGIN_PATH to fix ros_ign_bridge compatibility issues")
+    print(f"� Setting GZ_SIM_SYSTEM_PLUGIN_PATH for ros_gz compatibility")
+    print(f"🔧 Forcing RMW_IMPLEMENTATION=rmw_fastrtps_cpp to avoid SHM transport errors")
+    print(f"�🚀 Quick start: Wait 15 seconds for controllers, then use W/A/S/D keys to move robot")
+    print(f"⚠️  Controller loading may take time - watch for 'joint_state_broadcaster' success messages")
+    print(f"⚠️  Plugin errors fixed: ros_ign_bridge -> ros_gz_bridge compatibility added")
+    print(f"📂 World path: {world_path}")
+    print(f"📂 Using world directory: {custom_gazebo_dir}")
+    print(f"🔍 IGN_GAZEBO_RESOURCE_PATH: {custom_gazebo_dir}:{original_forest_dir}:{ros_share_path}")
+    print(f"⏱️  Timeline: World(0s) -> Robot(8s) -> Camera(12s) -> Teleop(15s)")
+    print(f"🐛 DEBUG: Launch starting with enhanced timing and error detection")
+    
+    turtlebot4_world_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([
+            os.path.join(get_package_share_directory('turtlebot4_ignition_bringup'), 'launch'),
+            '/ignition.launch.py'
+        ]),
+        launch_arguments={
+            'world': world_name,
+            'use_sim_time': use_sim_time,
+            'model': model,  # Use configurable model parameter (defaults to standard)
+        }.items()
+    )
+    
+    # Spawn TurtleBot4 robot with position arguments - increased delay to ensure world is ready
+    turtlebot4_spawn_launch = TimerAction(
+        period=8.0,  # Increased wait time to ensure world is fully loaded
+        actions=[
+            ExecuteProcess(
+                cmd=['echo', '🤖 DEBUG: Starting robot spawn at 8 seconds...'],
+                output='screen'
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource([
+                    os.path.join(get_package_share_directory('turtlebot4_ignition_bringup'), 'launch'),
+                    '/turtlebot4_spawn.launch.py'
+                ]),
+                launch_arguments={
+                    'x': x_pose,
+                    'y': y_pose,
+                    'z': z_pose,
+                    'yaw': yaw,
+                    'use_sim_time': use_sim_time,
+                    'model': model,  # Use configurable model parameter (defaults to standard)
+                }.items()
+            )
+        ]
+    )
+    
+    # Camera bridge node - automatically bridge camera topic for easy access
+    camera_bridge_node = TimerAction(
+        period=12.0,  # Start after robot is properly spawned and controllers loaded
+        actions=[
+            ExecuteProcess(
+                cmd=['echo', '📷 DEBUG: Starting camera bridge at 12 seconds...'],
+                output='screen'
+            ),
+            Node(
+                package='ros_gz_bridge',
+                executable='parameter_bridge',
+                name='camera_bridge_manual',
+                arguments=[
+                    '/camera@sensor_msgs/msg/Image[ignition.msgs.Image',
+                    '--ros-args', '-r', '/camera:=/test_camera'
+                ],
+                output='screen'
+            )
+        ]
+    )
+    
+    # Note: Teleop keyboard removed as it fails in non-interactive terminals
+    # Use manual commands: ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}}"
+    # Or use Gazebo GUI teleop plugin
+    
+    # Add a debug status checker
+    status_checker = TimerAction(
+        period=20.0,  # Check status after everything should be running
+        actions=[
+            ExecuteProcess(
+                cmd=['bash', '-c', '''
+echo "🔍 DEBUG: System Status Check at 20 seconds:"
+echo "📊 Active nodes:"
+ros2 node list | head -10
+echo "📊 Available topics:"
+ros2 topic list | grep -E "(cmd_vel|test_camera|joint_states)" || echo "❌ Key topics missing"
+echo "📊 Controller services:"
+ros2 service list | grep controller_manager || echo "❌ Controller manager not found"
+echo "📊 Joint states (should show wheel positions):"
+timeout 3 ros2 topic echo /joint_states --once | head -10 || echo "❌ No joint states"
+echo "🧪 Testing robot movement:"
+timeout 2 ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.1, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}" || echo "❌ Movement test failed"
+sleep 1
+echo "📊 Joint states after movement command:"
+timeout 3 ros2 topic echo /joint_states --once | grep -E "(position|velocity)" || echo "❌ No wheel movement detected"
+                '''],
+                output='screen'
+            )
+        ]
+    )
+    
+    # Add a manual controller fix attempt
+    controller_fix = TimerAction(
+        period=25.0,  # Try to fix controller after initial checks
+        actions=[
+            ExecuteProcess(
+                cmd=['bash', '-c', '''
+echo "🔧 DEBUG: Attempting controller fix..."
+echo "📊 Checking if controller manager is responsive:"
+timeout 5 ros2 service call /controller_manager/list_controllers controller_manager_msgs/srv/ListControllers || echo "❌ Controller manager not responsive"
+echo "🔧 Attempting to manually start joint state broadcaster:"
+timeout 10 ros2 run controller_manager spawner joint_state_broadcaster || echo "❌ Manual spawner failed"
+                '''],
+                output='screen'
+            )
+        ]
+    )
+
+    return LaunchDescription([
+        # Environment variables
+        ign_gazebo_resource_path_env,
+        ign_gazebo_system_plugin_path_env,
+        ldn_library_path_env,
+        gz_plugin_path_env,
+        rmw_implementation_env,
+        
+        # Launch arguments
+        declare_use_sim_time_cmd,
+        declare_model_cmd,
+        declare_x_position_cmd,
+        declare_y_position_cmd,
+        declare_z_position_cmd,
+        declare_yaw_cmd,
+        
+        # Launch sequence: World -> Robot -> Camera Bridge -> Status Check -> Controller Fix
+        turtlebot4_world_launch,
+        turtlebot4_spawn_launch,
+        camera_bridge_node,
+        status_checker,
+        controller_fix,
+    ])
