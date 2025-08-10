@@ -14,18 +14,8 @@ def generate_launch_description():
     # Paths and configurations
     package_share_dir = get_package_share_directory('pyroguard')
     world_path = os.path.join(package_share_dir, 'worlds', 'forest.sdf')
-    
-    # Keep the original path as backup in case the package world doesn't exist
-    fallback_world_path = '/home/adji714/custom_gazebo_worlds/forest/forest.world'
-    fallback_world_dir = '/home/adji714/custom_gazebo_worlds/forest'
-    
-    # Use package world if it exists, otherwise fallback to original
-    if os.path.exists(world_path):
-        custom_gazebo_world_path = world_path
-        custom_gazebo_dir = os.path.join(package_share_dir, 'worlds')
-    else:
-        custom_gazebo_world_path = fallback_world_path
-        custom_gazebo_dir = fallback_world_dir
+    custom_gazebo_world_path = world_path
+    custom_gazebo_dir = os.path.join(package_share_dir, 'worlds')
     
     # Launch arguments
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
@@ -38,12 +28,10 @@ def generate_launch_description():
     # Environment variables for plugin compatibility
     ros_share_path = '/opt/ros/humble/share'
     current_ign_path = os.environ.get('IGN_GAZEBO_RESOURCE_PATH', '')
-    original_forest_dir = '/home/adji714/custom_gazebo_worlds/forest'
-    
-    # Include original forest directory for textures and DAE files
+    # Only use local package worlds dir for resources
     ign_gazebo_resource_path_env = SetEnvironmentVariable(
         'IGN_GAZEBO_RESOURCE_PATH',
-        f"{custom_gazebo_dir}:{original_forest_dir}:{ros_share_path}:{current_ign_path}"
+        f"{custom_gazebo_dir}:{ros_share_path}:{current_ign_path}"
     )
     
     # Set correct plugin paths for ros_gz_bridge compatibility
@@ -106,12 +94,10 @@ def generate_launch_description():
         description='Initial yaw orientation of the robot'
     )
     
-    # Use TurtleBot4 ignition bringup launch with our custom world
-    world_name = 'forest'  # Will become forest.sdf
-    
-    # Launch just the world without any robot spawning
+    # Use local worlds/forest.sdf for the simulation world
+    local_world_path = os.path.join(package_share_dir, 'worlds', 'forest.sdf')
     turtlebot4_world_launch = ExecuteProcess(
-        cmd=['ign', 'gazebo', '-r', '/opt/ros/humble/share/turtlebot4_ignition_bringup/worlds/forest.sdf'],
+        cmd=['ign', 'gazebo', '-r', local_world_path],
         output='screen'
     )
     

@@ -11,8 +11,13 @@ import time
 # Consistent prefix for all fire models
 MODEL_PREFIX = "fire_model_"
 
-def load_tree_positions(file_path='/opt/ros/humble/share/turtlebot4_ignition_bringup/worlds/tree_positions.txt'):
+def load_tree_positions(file_path='../tree_manager/tree_positions.txt'):
     """Load tree positions from file"""
+    import os
+    # Always resolve relative to this script's directory
+    if not os.path.isabs(file_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, file_path)
     tree_positions = []
     try:
         with open(file_path, 'r') as f:
@@ -305,7 +310,7 @@ def add_single_fire(world_elem, fire_id, x, y, z, scale, fire_type='ground'):
         pbr_elem = ET.SubElement(material_elem, 'pbr')
         metal_elem = ET.SubElement(pbr_elem, 'metal')
         albedo_elem = ET.SubElement(metal_elem, 'albedo_map')
-        albedo_elem.text = "file:///home/adji714/custom_gazebo_worlds/forest/fire.png"
+        albedo_elem.text = "textures/fire.png"
         metalness_elem = ET.SubElement(metal_elem, 'metalness')
         metalness_elem.text = "0.0"
         roughness_elem = ET.SubElement(metal_elem, 'roughness')
@@ -350,9 +355,15 @@ def add_single_fire(world_elem, fire_id, x, y, z, scale, fire_type='ground'):
 
 if __name__ == "__main__":
     import argparse
+    import os
     parser = argparse.ArgumentParser(description='Clean and add realistic fires')
-    parser.add_argument('--world', default='/opt/ros/humble/share/turtlebot4_ignition_bringup/worlds/forest.sdf', help='World file')
+    parser.add_argument('--world', default='../worlds/forest.sdf', help='World file')
     parser.add_argument('--areas', type=int, default=8, help='Number of fire areas')
-    
+
     args = parser.parse_args()
-    clean_and_add_fires(args.world, args.areas)
+    # Always resolve world file relative to this script's directory if not absolute
+    world_file = args.world
+    if not os.path.isabs(world_file):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        world_file = os.path.join(script_dir, world_file)
+    clean_and_add_fires(world_file, args.areas)

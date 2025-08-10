@@ -1,6 +1,0 @@
-source;share/pyroguard/hook/pythonpath.ps1
-source;share/pyroguard/hook/pythonpath.dsv
-source;share/pyroguard/hook/pythonpath.sh
-source;share/pyroguard/hook/ament_prefix_path.ps1
-source;share/pyroguard/hook/ament_prefix_path.dsv
-source;share/pyroguard/hook/ament_prefix_path.sh

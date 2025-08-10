@@ -35,7 +35,7 @@ def remove_fire_effects(world_file):
 
 def main():
     parser = argparse.ArgumentParser(description='Remove all fire effects from forest world')
-    parser.add_argument('--world', default='/opt/ros/humble/share/turtlebot4_ignition_bringup/worlds/forest.sdf', help='World file to modify (default: custom gazebo world)')
+    parser.add_argument('--world', default='worlds/forest.sdf', help='World file to modify (default: custom gazebo world)')
     
     args = parser.parse_args()
     
