@@ -4,6 +4,7 @@ import torch.optim as optim
 import random
 import numpy as np
 from collections import deque
+import pickle  # Added for save/load
 
 class DQN(nn.Module):
     def __init__(self, input_size, num_actions):
@@ -35,6 +36,16 @@ class ReplayBuffer:
     
     def __len__(self):
         return len(self.buffer)
+    
+    # Added for offline collection
+    def save(self, path):
+        with open(path, 'wb') as f:
+            pickle.dump(list(self.buffer), f)
+    
+    def load(self, path):
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+        self.buffer = deque(data, maxlen=self.capacity)
 
 class DQNAgent:
     def __init__(self, input_size, num_actions):

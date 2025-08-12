@@ -105,3 +105,19 @@ ros2 launch pyroguard dqn_agent.launch.py
 
 ---
 For more details, see the code and launch files in each subdirectory.
+
+
+launch nodes
+
+
+
+ros2 launch slam_toolbox online_async_launch.py
+
+source ~/ros2_ws/install/setup.bash
+ros2 run pyroguard image_preprocessor.py
+ros2 run pyroguard fire_node.py
+ros2 run pyroguard lidar_vla_processor.py
+ros2 run pyroguard fire_suppression_handler.py
+ros2 run pyroguardreward_publisher.py
+ros2 run pyroguard map_coverage_node.py
+ros2 run pyroguard dqn_agent_node --ros-args -p mode:=collect

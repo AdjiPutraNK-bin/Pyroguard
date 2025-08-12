@@ -11,6 +11,7 @@ class ImagePreprocessorNode(Node):
         super().__init__('image_preprocessor_node')
         self.bridge = CvBridge()
         
+        # Subscription to input image
         self.create_subscription(
             Image, 
             '/test_camera', 
@@ -18,29 +19,32 @@ class ImagePreprocessorNode(Node):
             10
         )
         
-        self.pub = self.create_publisher(Image, '/processed_image', 10)
+        # Publishers for both processed and HSV images
+        self.pub_processed = self.create_publisher(Image, '/processed_image', 10)
+        self.pub_hsv = self.create_publisher(Image, '/hsv_image', 10)
         
         self.get_logger().info("🖼️ Image Preprocessor Node initialized")
 
-        # Launch rqt_image_view for /processed_image
-        import subprocess
-        try:
-            subprocess.Popen(["rqt_image_view", "-t", "/processed_image"])
-            self.get_logger().info("Launched rqt_image_view for /processed_image")
-        except Exception as e:
-            self.get_logger().warn(f"Could not launch rqt_image_view: {e}")
+    # rqt_image_view is no longer launched automatically. Please run it manually if needed.
 
     def image_callback(self, msg):
         try:
+            # Convert ROS image message to OpenCV image
             try:
                 cv_image = self.bridge.imgmsg_to_cv2(msg, 'rgb8')
             except:
                 cv_image_float = self.bridge.imgmsg_to_cv2(msg, '32FC3')
                 cv_image = (cv_image_float * 255).astype(np.uint8)
             
+            # Process resized image (original functionality)
             processed = cv2.resize(cv_image, (84, 84))
-            out_msg = self.bridge.cv2_to_imgmsg(processed, 'rgb8')
-            self.pub.publish(out_msg)
+            out_msg_processed = self.bridge.cv2_to_imgmsg(processed, 'rgb8')
+            self.pub_processed.publish(out_msg_processed)
+            
+            # Convert to HSV and publish with correct encoding
+            hsv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2HSV)
+            out_msg_hsv = self.bridge.cv2_to_imgmsg(hsv_image, 'rgb8')
+            self.pub_hsv.publish(out_msg_hsv)
             
         except Exception as e:
             self.get_logger().error(f'Image processing failed: {str(e)}')

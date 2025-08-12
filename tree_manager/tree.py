@@ -1,10 +1,13 @@
+
 import re
+import os
 
-input_file = "../worlds/forest.sdf"
-output_file = "../worlds/forest.sdf"
+script_dir = os.path.dirname(os.path.abspath(__file__))
+input_file = os.path.join(script_dir, '../worlds/forest.sdf')
+output_file = os.path.join(script_dir, '../worlds/forest.sdf')
 
-TREE_Z = 0.2      # Desired z for trees
-WALL_TOP_Z = 5    # Desired z for walls
+TREE_Z = 0      # Desired z for trees
+WALL_TOP_Z = 2    # Desired z for walls
 
 with open(input_file, "r") as f:
     content = f.read()

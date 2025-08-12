@@ -1,18 +1,21 @@
-GROUND_FIRE_HEIGHT = 2.0  # Height above ground for ground fires
-TREE_BASE_Z = 0.2        # All trees have the same base z
-TREE_HEIGHT = 6.7         # All trees have the same height
+GROUND_FIRE_HEIGHT = 1.0  # Height above ground for ground fires
+
 #!/usr/bin/env python3
 
 import xml.etree.ElementTree as ET
 import random
 import math
-import time
+import os
 
 # Consistent prefix for all fire models
-MODEL_PREFIX = "fire_model_"
+MODEL_PREFIX = "fire_"
 
-def load_tree_positions(file_path='/opt/ros/humble/share/turtlebot4_ignition_bringup/worlds/tree_positions.txt'):
+def load_tree_positions(file_path='../tree_manager/tree_positions.txt'):
     """Load tree positions from file"""
+    # Always resolve relative to this script's directory
+    if not os.path.isabs(file_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, file_path)
     tree_positions = []
     try:
         with open(file_path, 'r') as f:
@@ -25,6 +28,20 @@ def load_tree_positions(file_path='/opt/ros/humble/share/turtlebot4_ignition_bri
         print(f"Tree positions file {file_path} not found.")
         return []
     return tree_positions
+
+def save_fire_positions(positions, file_path='../fire_manager/fire_positions.txt'):
+    """Save fire positions to file"""
+    if not os.path.isabs(file_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, file_path)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    try:
+        with open(file_path, 'w') as f:
+            for x, y, z, name in positions:
+                f.write(f"{x:.6f},{y:.6f},{z:.6f},{name}\n")
+        print(f"Saved fire positions to {file_path}")
+    except Exception as e:
+        print(f"Error saving fire positions: {e}")
 
 def get_next_fire_id(world_elem):
     """Get the next available fire ID to avoid duplicates"""
@@ -46,7 +63,7 @@ def get_next_fire_id(world_elem):
     return next_id
 
 def clean_and_add_fires(world_file, num_fire_areas=5):
-    """Clean existing fires and add new ones with unique names"""
+    """Clean existing fires and add new steady individual ground fires"""
     
     tree_positions = load_tree_positions()
     if not tree_positions:
@@ -80,173 +97,36 @@ def clean_and_add_fires(world_file, num_fire_areas=5):
     print(f"Removed {fires_removed} existing fires")
     
     fire_counter = get_next_fire_id(world_elem)
-    min_dist = 1.0  # Reduced minimum allowed distance between fires (meters)
-    grid_size = min_dist
-    fire_grid = dict()  # (ix, iy) -> list of (x, y)
+    fire_positions = []
 
-    def grid_key(x, y):
-        return (int(x // grid_size), int(y // grid_size))
+    # Set seed for reproducible randomness
+    random.seed(42)
 
-    def is_far_enough(x, y):
-        gx, gy = grid_key(x, y)
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                cell = (gx + dx, gy + dy)
-                if cell in fire_grid:
-                    for fx, fy in fire_grid[cell]:
-                        if (x - fx) ** 2 + (y - fy) ** 2 < min_dist ** 2:
-                            return False
-        return True
+    # Select unique trees deterministically
+    num_areas = min(num_fire_areas, len(tree_positions))
+    selected_trees = random.sample(tree_positions, num_areas)
 
-    def add_to_grid(x, y):
-        key = grid_key(x, y)
-        if key not in fire_grid:
-            fire_grid[key] = []
-        fire_grid[key].append((x, y))
-
-    for area in range(num_fire_areas):
-        target_tree = random.choice(tree_positions)
+    for target_tree in selected_trees:
         tree_x, tree_y, tree_z, tree_name = target_tree
-        # Use constants for tree base and height
-        base_z = TREE_BASE_Z
-        tree_height = TREE_HEIGHT
 
+        # Deterministic angle and distance for scattering
         angle = random.uniform(0, 2 * math.pi)
         distance = random.uniform(2.0, 8.0)
         ground_x = tree_x + distance * math.cos(angle)
         ground_y = tree_y + distance * math.sin(angle)
+        z = GROUND_FIRE_HEIGHT
+        scale = 1.0  # Fixed scale for simplicity
 
-        fire_type = random.choice(['ground_only', 'ground_to_tree', 'tree_cluster'])
-
-        # Always at least 3-4 fires per area
-        min_fires = 3
-        max_fires = 4
-        fires_this_area = random.randint(min_fires, max_fires)
-
-        if fire_type == 'ground_only':
-            for i in range(fires_this_area):
-                tries = 0
-                while True:
-                    x = ground_x + random.uniform(-6.0, 6.0)
-                    y = ground_y + random.uniform(-6.0, 6.0)
-                    z = GROUND_FIRE_HEIGHT
-                    scale = random.uniform(0.8, 1.5)
-                    if is_far_enough(x, y) or tries > 10:
-                        break
-                    tries += 1
-                add_single_fire(world_elem, fire_counter, x, y, z, scale, 'ground')
-                add_to_grid(x, y)
-                fire_counter += 1
-
-        elif fire_type == 'ground_to_tree':
-            # Always at least 3 fires: ground, trunk, canopy
-            spread_chain = create_fire_spread_chain(ground_x, ground_y, tree_x, tree_y, 3)
-            for i, (x, y, z, scale) in enumerate(spread_chain):
-                fire_subtype = 'ground' if i == 0 else 'trunk' if i == 1 else 'canopy'
-                tries = 0
-                while not is_far_enough(x, y) and tries < 10:
-                    x += random.uniform(-0.5, 0.5)
-                    y += random.uniform(-0.5, 0.5)
-                    tries += 1
-                # Offset trunk and canopy fires to be proportional to tree height
-                if fire_subtype == 'trunk':
-                    z = base_z + tree_height * (1.0/3.0)
-                elif fire_subtype == 'canopy':
-                    z = base_z + tree_height * 0.9
-                elif fire_subtype == 'ground':
-                    z = GROUND_FIRE_HEIGHT
-                add_single_fire(world_elem, fire_counter, x, y, z, scale, fire_subtype)
-                add_to_grid(x, y)
-                fire_counter += 1
-            # If more than 3 fires requested, add extra ground fires
-            extra_fires = fires_this_area - 3
-            for i in range(extra_fires):
-                tries = 0
-                while True:
-                    x = ground_x + random.uniform(-6.0, 6.0)
-                    y = ground_y + random.uniform(-6.0, 6.0)
-                    z = GROUND_FIRE_HEIGHT
-                    scale = random.uniform(0.8, 1.5)
-                    if is_far_enough(x, y) or tries > 10:
-                        break
-                    tries += 1
-                add_single_fire(world_elem, fire_counter, x, y, z, scale, 'ground')
-                add_to_grid(x, y)
-                fire_counter += 1
-
-        else:  # tree_cluster
-            # Always at least 3 fires: 2 ground, 1 trunk, 1 canopy (if fires_this_area==4)
-            n_ground = min(2, fires_this_area)
-            for i in range(n_ground):
-                tries = 0
-                while True:
-                    angle = random.uniform(0, 2 * math.pi)
-                    distance = random.uniform(1.0, 8.0)
-                    x = tree_x + distance * math.cos(angle)
-                    y = tree_y + distance * math.sin(angle)
-                    z = GROUND_FIRE_HEIGHT
-                    scale = random.uniform(0.6, 1.2)
-                    if is_far_enough(x, y) or tries > 10:
-                        break
-                    tries += 1
-                add_single_fire(world_elem, fire_counter, x, y, z, scale, 'ground')
-                add_to_grid(x, y)
-                fire_counter += 1
-
-            if fires_this_area >= 3:
-                trunk_x = tree_x + random.uniform(-0.5, 0.5)
-                trunk_y = tree_y + random.uniform(-0.5, 0.5)
-                tries = 0
-                while not is_far_enough(trunk_x, trunk_y) and tries < 10:
-                    trunk_x += random.uniform(-0.2, 0.2)
-                    trunk_y += random.uniform(-0.2, 0.2)
-                    tries += 1
-                trunk_z = base_z + tree_height * (1.0/3.0)
-                add_single_fire(world_elem, fire_counter, trunk_x, trunk_y, trunk_z, 1.3, 'trunk')
-                add_to_grid(trunk_x, trunk_y)
-                fire_counter += 1
-
-            if fires_this_area == 4:
-                canopy_x = tree_x + random.uniform(-1.0, 1.0)
-                canopy_y = tree_y + random.uniform(-1.0, 1.0)
-                tries = 0
-                while not is_far_enough(canopy_x, canopy_y) and tries < 10:
-                    canopy_x += random.uniform(-0.5, 0.5)
-                    canopy_y += random.uniform(-0.5, 0.5)
-                    tries += 1
-                canopy_z = base_z + tree_height * 0.9
-                add_single_fire(world_elem, fire_counter, canopy_x, canopy_y, canopy_z, 0.8, 'canopy')
-                add_to_grid(canopy_x, canopy_y)
-                fire_counter += 1
+        model_name = f"{MODEL_PREFIX}{fire_counter}"
+        add_single_fire(world_elem, fire_counter, ground_x, ground_y, z, scale, 'ground')
+        fire_positions.append((ground_x, ground_y, z, model_name))
+        fire_counter += 1
     
     tree.write(world_file, encoding='utf-8', xml_declaration=True)
     total_fires = fire_counter - 1
     print(f"✅ Added {total_fires} new fires to {world_file}")
 
-def create_fire_spread_chain(start_x, start_y, end_x, end_y, num_fires=3):
-    """Create a chain of fires spreading from ground to tree canopy"""
-    fire_positions = []
-    
-    for i in range(num_fires):
-        progress = i / (num_fires - 1) if num_fires > 1 else 0
-        
-        x = start_x + (end_x - start_x) * progress
-        y = start_y + (end_y - start_y) * progress
-        
-        if i == 0:
-            z = 0.3
-        elif i == 1:
-            z = random.uniform(1.5, 2.5)
-        else:
-            z = random.uniform(3.0, 5.0)
-        
-        x += random.uniform(-0.5, 0.5)
-        y += random.uniform(-0.5, 0.5)
-        scale = 1.5 - (progress * 0.7)
-        
-        fire_positions.append((x, y, z, scale))
-    
-    return fire_positions
+    save_fire_positions(fire_positions)
 
 def add_single_fire(world_elem, fire_id, x, y, z, scale, fire_type='ground'):
     """Add a single fire model with consistent naming"""
@@ -256,7 +136,7 @@ def add_single_fire(world_elem, fire_id, x, y, z, scale, fire_type='ground'):
     fire_model = ET.Element('model')
     fire_model.set('name', model_name)
     pose_elem = ET.SubElement(fire_model, 'pose')
-    yaw = random.uniform(0, 2 * math.pi)
+    yaw = 0.0  # Fixed yaw for simplicity
     pose_elem.text = f"{x:.2f} {y:.2f} {z:.2f} 0 0 {yaw:.2f}"
     static_elem = ET.SubElement(fire_model, 'static')
     static_elem.text = 'true'
@@ -273,10 +153,10 @@ def add_single_fire(world_elem, fire_id, x, y, z, scale, fire_type='ground'):
         # Include model prefix in visual name
         visual_elem.set('name', f'{model_name}_{visual_name}_{j}')
         offset_z = j * 0.1
-        offset_x = random.uniform(-0.05, 0.05)
-        offset_y = random.uniform(-0.05, 0.05)
+        offset_x = 0.0  # Fixed offset for simplicity
+        offset_y = 0.0  # Fixed offset for simplicity
         pose_visual = ET.SubElement(visual_elem, 'pose')
-        layer_yaw = rotation + random.uniform(-0.1, 0.1)
+        layer_yaw = rotation  # Fixed yaw without random variation
         pose_visual.text = f"{offset_x:.2f} {offset_y:.2f} {offset_z:.2f} 0 0 {layer_yaw:.2f}"
         geometry_elem = ET.SubElement(visual_elem, 'geometry')
         box_elem = ET.SubElement(geometry_elem, 'box')
@@ -305,7 +185,7 @@ def add_single_fire(world_elem, fire_id, x, y, z, scale, fire_type='ground'):
         pbr_elem = ET.SubElement(material_elem, 'pbr')
         metal_elem = ET.SubElement(pbr_elem, 'metal')
         albedo_elem = ET.SubElement(metal_elem, 'albedo_map')
-        albedo_elem.text = "file:///home/adji714/custom_gazebo_worlds/forest/fire.png"
+        albedo_elem.text = "textures/fire.png"
         metalness_elem = ET.SubElement(metal_elem, 'metalness')
         metalness_elem.text = "0.0"
         roughness_elem = ET.SubElement(metal_elem, 'roughness')
@@ -351,8 +231,13 @@ def add_single_fire(world_elem, fire_id, x, y, z, scale, fire_type='ground'):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Clean and add realistic fires')
-    parser.add_argument('--world', default='/opt/ros/humble/share/turtlebot4_ignition_bringup/worlds/forest.sdf', help='World file')
+    parser.add_argument('--world', default='../worlds/forest.sdf', help='World file')
     parser.add_argument('--areas', type=int, default=8, help='Number of fire areas')
-    
+
     args = parser.parse_args()
-    clean_and_add_fires(args.world, args.areas)
+    # Always resolve world file relative to this script's directory if not absolute
+    world_file = args.world
+    if not os.path.isabs(world_file):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        world_file = os.path.join(script_dir, world_file)
+    clean_and_add_fires(world_file, args.areas)

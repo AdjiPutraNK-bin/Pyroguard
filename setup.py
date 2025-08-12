@@ -30,7 +30,8 @@ setup(
             'lidar_vla_processor_node = pyroguard.lidar_vla_processor:main',
             'reward_publisher_node = pyroguard.reward_publisher:main',
             'fire_suppression_handler_node = pyroguard.fire_suppression_handler:main',
-            'fire_segmentation_node = pyroguard.fire_segmentation:main',
+            'train_node = pyroguard.train:main',
+            'fire_node = pyroguard.fire_node:main',
         ],
     },
 )
