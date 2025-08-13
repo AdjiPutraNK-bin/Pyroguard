@@ -17,7 +17,7 @@ def generate_launch_description():
         # Image Preprocessor Node
         Node(
             package='pyroguard',
-            executable='image_preprocessor.py',
+            executable='image_preprocessor_node',
             name='image_preprocessor',
             output='screen'
         ),
@@ -25,7 +25,7 @@ def generate_launch_description():
         # Fire Detection Node (YOLO)
         Node(
             package='pyroguard',
-            executable='fire_node.py',
+            executable='fire_node',
             name='fire_node',
             output='screen',
             parameters=[
@@ -37,7 +37,7 @@ def generate_launch_description():
         # LIDAR-VLA Processor Node
         Node(
             package='pyroguard',
-            executable='lidar_vla_processor.py',
+            executable='lidar_vla_processor_node',
             name='lidar_vla_processor',
             output='screen',
             parameters=[
@@ -50,7 +50,7 @@ def generate_launch_description():
         # Fire Suppression Handler Node
         Node(
             package='pyroguard',
-            executable='fire_suppression_handler.py',
+            executable='fire_suppression_handler_node',
             name='fire_suppression_handler',
             output='screen',
             parameters=[
@@ -64,7 +64,7 @@ def generate_launch_description():
         # Reward Publisher Node
         Node(
             package='pyroguard',
-            executable='reward_publisher.py',
+            executable='reward_publisher_node',
             name='reward_publisher',
             output='screen',
             parameters=[
@@ -77,9 +77,10 @@ def generate_launch_description():
         ),
         
         # Map Coverage Node
+        # If you have a map_coverage_node entry point, use it here. Otherwise, keep as is or add to setup.py.
         Node(
             package='pyroguard',
-            executable='map_coverage_node.py',
+            executable='map_coverage_node',
             name='map_coverage',
             output='screen',
             parameters=[
@@ -93,7 +94,7 @@ def generate_launch_description():
         # DQN Agent Node
         Node(
             package='pyroguard',
-            executable='dqn_agent_node.py',
+            executable='dqn_agent_node',
             name='dqn_agent_node',
             output='screen',
             parameters=[

@@ -32,6 +32,7 @@ setup(
             'fire_suppression_handler_node = pyroguard.fire_suppression_handler:main',
             'train_node = pyroguard.train:main',
             'fire_node = pyroguard.fire_node:main',
+            'map_coverage_node = pyroguard.map_coverage_node:main'
         ],
     },
 )

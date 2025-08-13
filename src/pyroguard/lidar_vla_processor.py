@@ -38,7 +38,7 @@ class LidarVlaProcessorNode(Node):
         self.obs_pub = self.create_publisher(Float32MultiArray, '/obs', 10)
 
         # State
-        self.vla_data = None  # [fire_or_no, fire_size]
+        self.vla_data = None  # [fire_or_no, fire_size, fire_id, bbox_x]
         self.lidar_min_distance = float('inf')
         self.robot_pose = None
         self.fire_poses = {}  # model_name: (x, y, z)
@@ -46,7 +46,6 @@ class LidarVlaProcessorNode(Node):
 
         # Timer for publishing observations
         self.timer = self.create_timer(0.1, self.publish_observation)
-        
         self.get_logger().info("🚀 LIDAR-VLA Processor Node initialized")
 
     def lidar_callback(self, msg):
@@ -55,10 +54,17 @@ class LidarVlaProcessorNode(Node):
         self.lidar_min_distance = float(np.min(ranges)) if len(ranges) > 0 else float('inf')
 
     def vla_callback(self, msg):
-        if len(msg.data) == 2:
+        if len(msg.data) == 3:
+            # Legacy: [fire_or_no, fire_size, fire_id]
+            self.vla_data = np.array(list(msg.data) + [0.5, 0.0, 0.0, 0.0], dtype=np.float32)  # Default bbox_x=0.5, pose=0
+        elif len(msg.data) == 4:
+            # [fire_or_no, fire_size, fire_id, bbox_x]
+            self.vla_data = np.array(list(msg.data) + [0.0, 0.0, 0.0], dtype=np.float32)
+        elif len(msg.data) == 7:
+            # [fire_or_no, fire_size, fire_id, bbox_x, fire_x, fire_y, fire_z]
             self.vla_data = np.array(msg.data, dtype=np.float32)
         else:
-            self.get_logger().error(f"Invalid VLA data: expected 2 elements, got {len(msg.data)}")
+            self.get_logger().error(f"Invalid VLA data: expected 3, 4, or 7 elements, got {len(msg.data)}")
 
     def odom_callback(self, msg):
         self.robot_pose = msg.pose.pose
@@ -77,13 +83,13 @@ class LidarVlaProcessorNode(Node):
                     t = transform.transform.translation
                     # Check if fire is suppressed
                     for sx, sy in self.suppressed_fires:
-                        if math.hypot(t.x - sx, t.y - sy) < 0.5:  # Threshold for matching
+                        if math.hypot(t.x - sx, t.y - sy) < 1.2:  # Threshold for matching
                             break
                     else:
                         self.fire_poses[model_name] = (t.x, t.y, t.z)
 
     def resolve_model_name(self, frame_id):
-        MODEL_PREFIX = "fire_model_"
+        MODEL_PREFIX = "fire_"
         if re.match(fr"^{MODEL_PREFIX}\d+$", frame_id):
             return frame_id
         if '::' in frame_id:
@@ -96,20 +102,27 @@ class LidarVlaProcessorNode(Node):
         return None
 
     def compute_angle_to_fire(self):
-        if not self.fire_poses or self.robot_pose is None:
-            self.get_logger().warning("Missing robot or fire poses, using angle_to_fire=0.0", throttle_duration_sec=5.0)
+        if not self.fire_poses or self.robot_pose is None or self.vla_data is None or len(self.vla_data) < 3:
+            self.get_logger().warning("Missing robot/fire poses or fire ID, using angle_to_fire=0.0", throttle_duration_sec=5.0)
             return 0.0
         rx, ry = self.robot_pose.position.x, self.robot_pose.position.y
         yaw = self.quaternion_to_yaw(self.robot_pose.orientation)
-        min_dist = float('inf')
+        fire_id_num = int(self.vla_data[2])
         target_angle = 0.0
-        for pos in self.fire_poses.values():
-            fx, fy = pos[0], pos[1]
-            dist = math.hypot(fx - rx, fy - ry)
-            if dist < min_dist:
-                min_dist = dist
-                angle = math.atan2(fy - ry, fx - rx) - yaw
-                target_angle = np.arctan2(np.sin(angle), np.cos(angle))
+        # Find fire pose by ID
+        fire_key = f"fire_{fire_id_num}"
+        if fire_key in self.fire_poses:
+            fx, fy = self.fire_poses[fire_key][0], self.fire_poses[fire_key][1]
+            angle = math.atan2(fy - ry, fx - rx) - yaw
+            target_angle = np.arctan2(np.sin(angle), np.cos(angle))
+            # Only log when angle changes sign (crosses zero)
+            if not hasattr(self, 'last_angle_sign'):
+                self.last_angle_sign = np.sign(target_angle)
+            if np.sign(target_angle) != self.last_angle_sign:
+                self.get_logger().info(f"Angle sign change: robot=({rx:.2f},{ry:.2f}), yaw={yaw:.2f}, fire=({fx:.2f},{fy:.2f}), raw_angle={angle:.2f}, target_angle={target_angle:.2f}")
+            self.last_angle_sign = np.sign(target_angle)
+        else:
+            self.get_logger().warning(f"Fire ID {fire_key} not found in fire_poses", throttle_duration_sec=5.0)
         return target_angle
 
     def quaternion_to_yaw(self, q):
@@ -119,26 +132,37 @@ class LidarVlaProcessorNode(Node):
 
     def publish_observation(self):
         if self.vla_data is not None and self.lidar_min_distance != float('inf'):
-            angle_to_fire = self.compute_angle_to_fire()
-            obs = np.concatenate([self.vla_data, [self.lidar_min_distance, angle_to_fire]])
+            # Only provide angle_to_fire if fire is detected
+            if self.vla_data[0] > 0.5:
+                angle_to_fire = self.compute_angle_to_fire()
+            else:
+                angle_to_fire = 0.0
+            bbox_x = self.vla_data[3] if len(self.vla_data) > 3 else 0.5
+            fire_pose = self.vla_data[4:7] if len(self.vla_data) >= 7 else [0.0, 0.0, 0.0]
+            # Log when bbox_x crosses center (0.5)
+            if not hasattr(self, 'last_bbox_sign'):
+                self.last_bbox_sign = np.sign(bbox_x - 0.5)
+            if np.sign(bbox_x - 0.5) != self.last_bbox_sign:
+                self.get_logger().info(f"bbox_x center crossing: bbox_x={bbox_x:.2f}")
+            self.last_bbox_sign = np.sign(bbox_x - 0.5)
+            # Publish obs: [fire_or_no, fire_size, lidar_min_distance, angle_to_fire, bbox_x, fire_x, fire_y, fire_z]
+            obs = np.concatenate([self.vla_data[:2], [self.lidar_min_distance, angle_to_fire, bbox_x], fire_pose])
             msg = Float32MultiArray()
             msg.data = obs.tolist()
             self.obs_pub.publish(msg)
+            self.get_logger().info("Received both VLA and LIDAR data, publishing observation.")
         else:
             if self.vla_data is None and self.lidar_min_distance == float('inf'):
-                self.get_logger().warning(
-                    "Incomplete observation data: missing both VLA and LIDAR",
-                    throttle_duration_sec=5.0
+                self.get_logger().debug(
+                    "Incomplete observation data: missing both VLA and LIDAR"
                 )
             elif self.vla_data is None:
-                self.get_logger().warning(
-                    "Incomplete observation data: missing VLA data",
-                    throttle_duration_sec=5.0
+                self.get_logger().debug(
+                    "Incomplete observation data: missing VLA data"
                 )
             elif self.lidar_min_distance == float('inf'):
-                self.get_logger().warning(
-                    "Incomplete observation data: missing LIDAR data",
-                    throttle_duration_sec=5.0
+                self.get_logger().debug(
+                    "Incomplete observation data: missing LIDAR data"
                 )
 
 def main(args=None):

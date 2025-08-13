@@ -17,6 +17,7 @@ class YOLOv8FireDetectionNode(Node):
     def __init__(self):
         super().__init__('fire_node')
 
+
         # Parameters
         self.model_path = self.declare_parameter(
             'model_path',
@@ -25,6 +26,10 @@ class YOLOv8FireDetectionNode(Node):
         self.confidence_threshold = self.declare_parameter(
             'confidence_threshold',
             0.5
+        ).value
+        self.world_name = self.declare_parameter(
+            'world_name',
+            'forest_world'
         ).value
 
         # Load YOLOv8 model
@@ -75,7 +80,7 @@ class YOLOv8FireDetectionNode(Node):
                         self.fire_poses[model_name] = (t.x, t.y, t.z)
 
     def resolve_model_name(self, frame_id):
-        MODEL_PREFIX = "fire_model_"
+        MODEL_PREFIX = "fire_"
         if re.match(fr"^{MODEL_PREFIX}\d+$", frame_id):
             return frame_id
         if '::' in frame_id:
@@ -97,28 +102,84 @@ class YOLOv8FireDetectionNode(Node):
 
         fire_detected = 0.0
         max_confidence = 0.0
+        detected_fire_id = None
+        closest_fire_pose = (0.0, 0.0, 0.0)
 
+        # Draw bounding boxes for visualization
+        vis_image = hsv_image.copy()
         if results and len(results) > 0:
             boxes = results[0].boxes
+            # Find the closest unsuppressed fire and only publish that one
+            min_dist = float('inf')
+            best_id = None
+            best_pose = (0.0, 0.0, 0.0)
+            best_conf = 0.0
+            best_bbox_x = 0.5
             for box in boxes:
                 cls_id = int(box.cls[0])
                 conf = float(box.conf[0])
                 label = self.class_names[cls_id]
+                xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                x1, y1, x2, y2 = xyxy
+                # Only draw bounding box for unsuppressed fires
+                draw_box = True
                 if label.lower() == 'fire':
-                    # Check if detected fire matches a suppressed fire
-                    for fire_pos in self.fire_poses.values():
+                    for model_id, fire_pos in self.fire_poses.items():
                         for sx, sy in self.suppressed_fires:
-                            if math.hypot(fire_pos[0] - sx, fire_pos[1] - sy) < 0.5:
+                            if math.hypot(fire_pos[0] - sx, fire_pos[1] - sy) < 1.2:
+                                draw_box = False
                                 break
                         else:
-                            if conf > max_confidence:
-                                fire_detected = 1.0
-                                max_confidence = conf
+                            dist = math.hypot(fire_pos[0], fire_pos[1])
+                            if dist < min_dist:
+                                min_dist = dist
+                                best_id = model_id
+                                best_pose = fire_pos
+                                best_conf = conf
+                                best_bbox_x = ((x1 + x2) / 2) / hsv_image.shape[1]
+                if draw_box:
+                    color = (0, 0, 255) if label.lower() == 'fire' else (0, 255, 0)
+                    cv2.rectangle(vis_image, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(vis_image, f"{label} {conf:.2f}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            if best_id is not None:
+                # Check if closest fire pose is already suppressed
+                suppressed = False
+                for sx, sy in self.suppressed_fires:
+                    if math.hypot(best_pose[0] - sx, best_pose[1] - sy) < 1.2:
+                        suppressed = True
+                        self.get_logger().info(f"Fire at ({best_pose[0]:.2f}, {best_pose[1]:.2f}) is suppressed (within 1.2m)")
+                        break
+                if not suppressed:
+                    fire_detected = 1.0
+                    max_confidence = best_conf
+                    detected_fire_id = best_id
+                    closest_fire_pose = best_pose
+                    bbox_x = best_bbox_x
+                else:
+                    fire_detected = 0.0
+                    max_confidence = 0.0
+                    detected_fire_id = None
+                    closest_fire_pose = (0.0, 0.0, 0.0)
+                    bbox_x = 0.5
 
-        msg_out = Float32MultiArray()
-        msg_out.data = [fire_detected, max_confidence]
-        self.vla_pub.publish(msg_out)
-        self.get_logger().info(f"Fire detected: {fire_detected}, Confidence: {max_confidence:.2f}")
+        # Show the image with bounding boxes
+        cv2.imshow("YOLO Fire Detection", vis_image)
+        cv2.waitKey(1)
+
+        # Publish fire_detected, max_confidence, detected_fire_id (as int if possible, else -1)
+        fire_id_num = -1
+        if detected_fire_id is not None:
+            match = re.search(r'fire_(\d+)', detected_fire_id)
+            if match:
+                fire_id_num = int(match.group(1))
+
+        # Only publish VLA message if a valid, unsuppressed fire is detected
+        if results and len(results) > 0 and fire_detected > 0.5:
+            msg_out = Float32MultiArray()
+            # Publish: [fire_detected, max_confidence, fire_id_num, bbox_x, fire_x, fire_y, fire_z]
+            msg_out.data = [fire_detected, max_confidence, float(fire_id_num), bbox_x, closest_fire_pose[0], closest_fire_pose[1], closest_fire_pose[2]]
+            self.vla_pub.publish(msg_out)
+            self.get_logger().info(f"Fire detected: {fire_detected}, Confidence: {max_confidence:.2f}, Fire ID: {fire_id_num}, bbox_x: {bbox_x:.2f}, pose: {closest_fire_pose}")
 
 def main(args=None):
     rclpy.init(args=args)

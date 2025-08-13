@@ -7,20 +7,23 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, Int32
 from nav_msgs.msg import Odometry
 from tf2_msgs.msg import TFMessage
-from ros_gz_interfaces.srv import DeleteEntity
-from ros_gz_interfaces.msg import Entity
+from geometry_msgs.msg import PointStamped
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.time import Time
-from geometry_msgs.msg import PointStamped
 
 # Constants
-MODEL_PREFIX = "fire_model_"
+MODEL_PREFIX = "fire_oka"
 GROUND_PRIORITY_Z_THRESHOLD = 2.5
-DELETE_TIMEOUT = 10.0
 
 class FireSuppressionHandler(Node):
+    # Track suppression mode from RL agent
     def __init__(self):
         super().__init__('fire_suppression_handler')
+        self.suppression_mode = False
+        self.create_subscription(Bool, '/suppression_mode', self.suppression_mode_callback, 10)
+
+    def suppression_mode_callback(self, msg: Bool):
+        self.suppression_mode = msg.data
 
         # Parameters
         self.declare_parameter('fov_deg', 30.0)
@@ -33,14 +36,11 @@ class FireSuppressionHandler(Node):
         self.world_name = self.get_parameter('world_name').value
         self.debug_detection = self.get_parameter('debug_detection').value
 
-        # Service endpoint
-        self.delete_service = f'/world/{self.world_name}/remove'
-
         # State
         self.odom = None
         self.fire_models = {}  # model_name: (x, y, z)
         self.suppressed_fires = []  # List of (x, y) for suppressed fires
-        self.suppressed_count = 0  # Added: Track number of suppressed fires
+        self.suppressed_count = 0  # Track number of suppressed fires
         self.last_suppression_time = self.get_clock().now()
         self.last_tf_log_time = self.get_clock().now()
         self.tf_count = 0
@@ -60,13 +60,7 @@ class FireSuppressionHandler(Node):
         self.suppressed_count_pub = self.create_publisher(Int32, '/suppressed_fire_count', 10)
         self.suppressed_fire_pub = self.create_publisher(PointStamped, '/suppressed_fire_position', 10)
 
-        # Service client
-        self.delete_client = self.create_client(DeleteEntity, self.delete_service)
-        self.get_logger().info(f"Waiting for delete service: {self.delete_service}")
-        if not self.delete_client.wait_for_service(timeout_sec=10.0):
-            self.get_logger().error(f"Delete service not available: {self.delete_service}")
-        else:
-            self.get_logger().info(f"Connected to delete service: {self.delete_service}")
+        self.get_logger().info("🚀 Fire Suppression Handler Node initialized")
 
     def pose_info_cb(self, msg: TFMessage):
         current_time = self.get_clock().now()
@@ -103,18 +97,38 @@ class FireSuppressionHandler(Node):
                     self.get_logger().info(f"Could not resolve model name from frame: {frame_id}")
                 continue
             t = transform.transform.translation
-            self.fire_models[model_name] = (t.x, t.y, t.z)
-            if self.debug_detection:
-                self.get_logger().info(f"Tracking fire: {model_name} at ({t.x:.2f}, {t.y:.2f}, {t.z:.2f})")
+            # Check if fire is already suppressed
+            for sx, sy in self.suppressed_fires:
+                if math.hypot(t.x - sx, t.y - sy) < 0.5:  # Threshold for matching
+                    continue
+            else:
+                self.fire_models[model_name] = (t.x, t.y, t.z)
+                if self.debug_detection:
+                    self.get_logger().info(f"Tracking fire: {model_name} at ({t.x:.2f}, {t.y:.2f}, {t.z:.2f})")
 
     def resolve_model_name(self, frame_id):
-        if re.match(fr"^{MODEL_PREFIX}\d+$", frame_id):
-            return frame_id
+        # Match fire_model_XX, fire_XX, or fire_XX_... patterns
+        m = re.match(r'^(fire_model_\d+)', frame_id)
+        if m:
+            return m.group(1)
+        m = re.match(r'^(fire_\d+)', frame_id)
+        if m:
+            return m.group(1)
+        m = re.match(r'^(fire_\d+)_', frame_id)
+        if m:
+            return m.group(1)
+        # Also check for double colon separated names
         if '::' in frame_id:
             parts = frame_id.split('::')
-            if re.match(fr"^{MODEL_PREFIX}\d+$", parts[0]):
-                return parts[0]
-        match = re.search(rf'({MODEL_PREFIX}\d+)', frame_id)
+            for part in parts:
+                m = re.match(r'^(fire_model_\d+)', part)
+                if m:
+                    return m.group(1)
+                m = re.match(r'^(fire_\d+)', part)
+                if m:
+                    return m.group(1)
+        # Fallback: search for fire_model_XX or fire_XX anywhere in the string
+        match = re.search(r'(fire_model_\d+|fire_\d+)', frame_id)
         if match:
             return match.group(1)
         return None
@@ -134,7 +148,7 @@ class FireSuppressionHandler(Node):
             self.get_logger().warning("No fire models detected for suppression")
             return
         self.get_logger().info("Trigger received - locating fires")
-        self.select_and_delete_fire()
+        self.select_and_suppress_fire()
         self.last_suppression_time = current_time
 
     def log_current_fires(self):
@@ -163,7 +177,7 @@ class FireSuppressionHandler(Node):
         dot = float(np.dot(forward, vec))
         return dot >= math.cos(math.radians(self.fov_deg)), dist, dot
 
-    def select_and_delete_fire(self):
+    def select_and_suppress_fire(self):
         rx = self.odom.position.x
         ry = self.odom.position.y
         rz = self.odom.position.z
@@ -180,7 +194,7 @@ class FireSuppressionHandler(Node):
                 'in_fov': in_fov,
                 'z': z,
                 'score': dist + 0.5*(1.0 - dot) + ground_priority,
-                'pos': (x, y)  # Added for suppressed fire tracking
+                'pos': (x, y)
             })
         if not candidates:
             self.get_logger().warning("No valid fire candidates found")
@@ -195,16 +209,16 @@ class FireSuppressionHandler(Node):
         in_fov = [c for c in candidates if c['in_fov']]
         candidates_to_consider = in_fov if in_fov else candidates
         best_candidate = min(candidates_to_consider, key=lambda x: x['score'])
-        self.get_logger().info(
-            f"Selected fire: {best_candidate['name']} "
-            f"Dist: {best_candidate['dist']:.2f}m "
-            f"Dot: {best_candidate['dot']:.2f} "
-            f"In FOV: {best_candidate['in_fov']} "
-            f"Z: {best_candidate['z']:.2f}m"
-        )
-        success = self.delete_fire(best_candidate['name'])
-        if success and best_candidate['name'] in self.fire_models:
-            # Added: Track suppressed fire
+    # Proximity check: only suppress if within 1.2m AND suppression_mode is True
+        if best_candidate['dist'] <= 1.2 and self.suppression_mode:
+            self.get_logger().info(
+                f"Selected fire: {best_candidate['name']} "
+                f"Dist: {best_candidate['dist']:.2f}m "
+                f"Dot: {best_candidate['dot']:.2f} "
+                f"In FOV: {best_candidate['in_fov']} "
+                f"Z: {best_candidate['z']:.2f}m"
+            )
+            # Mark fire as suppressed
             self.suppressed_fires.append(best_candidate['pos'])
             self.suppressed_count += 1
             # Publish suppressed fire position
@@ -217,38 +231,17 @@ class FireSuppressionHandler(Node):
             self.suppressed_fire_pub.publish(point_msg)
             # Publish count
             self.suppressed_count_pub.publish(Int32(data=self.suppressed_count))
-            del self.fire_models[best_candidate['name']]
-            self.get_logger().info(f"Removed {best_candidate['name']} from tracking")
+            # Remove from fire_models to prevent re-suppression
+            if best_candidate['name'] in self.fire_models:
+                del self.fire_models[best_candidate['name']]
+                self.get_logger().info(f"Marked {best_candidate['name']} as suppressed")
             if not self.fire_models:
                 self.all_done_pub.publish(Bool(data=True))
                 self.get_logger().info(f"🏆 All fires suppressed! Total: {self.suppressed_count}")
-
-    def delete_fire(self, model_name):
-        req = DeleteEntity.Request()
-        req.entity = Entity(name=model_name, type=Entity.MODEL)
-        try:
-            self.get_logger().info(f"Requesting deletion: {model_name}")
-            future = self.delete_client.call_async(req)
-            start_time = self.get_clock().now()
-            while (self.get_clock().now() - start_time).nanoseconds < DELETE_TIMEOUT * 1e9:
-                rclpy.spin_once(self, timeout_sec=0.1)
-                if future.done():
-                    break
-            if future.done():
-                response = future.result()
-                if response.success:
-                    self.get_logger().info(f"✅ Successfully deleted {model_name}")
-                    return True
-                else:
-                    self.get_logger().warn(f"Service reported failure deleting {model_name}")
-                    return False
-            else:
-                self.get_logger().warn(f"Delete request timed out for {model_name}")
-                future.cancel()
-                return False
-        except Exception as e:
-            self.get_logger().error(f"Exception during delete: {str(e)}")
-            return False
+        else:
+            self.get_logger().info(
+                f"Fire {best_candidate['name']} is too far to suppress (Dist: {best_candidate['dist']:.2f}m)"
+            )
 
     def odom_cb(self, msg: Odometry):
         self.odom = msg.pose.pose
