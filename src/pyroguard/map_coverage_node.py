@@ -40,9 +40,7 @@ class MapCoverageNode(Node):
         # State
         self.current_map = None
         self.suppressed_fires = []
-        self.active_fires = []
         self.suppressed_count = 0
-        self.all_suppressed = False
 
         self.get_logger().info("🚀 Map Coverage Node initialized")
 
@@ -100,12 +98,6 @@ class MapCoverageNode(Node):
             mx = int((x - origin_x) / resolution)
             my = int((y - origin_y) / resolution)
             return mx, my
-
-        # Draw active fires (red)
-        for pos in self.active_fires:
-            mx, my = world_to_map(pos[0], pos[1])
-            if 0 <= mx < self.current_map.info.width and 0 <= my < self.current_map.info.height:
-                cv2.circle(image, (mx, my), 5, (0, 0, 255), -1)  # Red dot
 
         # Draw suppressed fires (blue)
         for pos in self.suppressed_fires:

@@ -9,9 +9,8 @@ import pickle  # Added for save/load
 class DQN(nn.Module):
     def __init__(self, input_size, num_actions):
         super().__init__()
-        # Force input_size to 5 for new obs (fire_or_no, fire_size, lidar_min_distance, angle_to_fire, bbox_x)
         self.net = nn.Sequential(
-            nn.Linear(8, 64),
+            nn.Linear(input_size, 64),
             nn.ReLU(),
             nn.Linear(64, 64),
             nn.ReLU(),

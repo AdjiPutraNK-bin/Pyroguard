@@ -258,6 +258,22 @@ def generate_launch_description():
     )
 
 
+    # Add explicit cmd_vel bridges for both topics
+    cmd_vel_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='cmd_vel_bridge',
+        arguments=['/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'],
+        output='screen'
+    )
+    model_cmd_vel_bridge_explicit = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='model_cmd_vel_bridge_explicit',
+        arguments=['/model/turtlebot4/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'],
+        output='screen'
+    )
+
     return LaunchDescription([
         # Environment variables
         ign_gazebo_resource_path_env,
@@ -282,4 +298,6 @@ def generate_launch_description():
         turtlebot4_spawn_launch,
         lidar_bridge_node,
         camera_bridge_node,
+        cmd_vel_bridge,
+        model_cmd_vel_bridge_explicit,
     ])

@@ -1,5 +1,3 @@
-GROUND_FIRE_HEIGHT = 1.0  # Height above ground for ground fires
-
 #!/usr/bin/env python3
 
 import xml.etree.ElementTree as ET
@@ -9,6 +7,7 @@ import os
 
 # Consistent prefix for all fire models
 MODEL_PREFIX = "fire_"
+GROUND_FIRE_HEIGHT = 1.0  # Height above ground for ground fires
 
 def load_tree_positions(file_path='../tree_manager/tree_positions.txt'):
     """Load tree positions from file"""
@@ -129,7 +128,7 @@ def clean_and_add_fires(world_file, num_fire_areas=5):
     save_fire_positions(fire_positions)
 
 def add_single_fire(world_elem, fire_id, x, y, z, scale, fire_type='ground'):
-    """Add a single fire model with consistent naming"""
+    """Add a single fire model with consistent naming and pose published in world frame"""
     # Use unified prefix for model name
     model_name = f"{MODEL_PREFIX}{fire_id}"
     
@@ -226,7 +225,30 @@ def add_single_fire(world_elem, fire_id, x, y, z, scale, fire_type='ground'):
         cast_shadows_light = ET.SubElement(light_elem, 'cast_shadows')
         cast_shadows_light.text = 'false'
 
-    world_elem.append(fire_model)
+    # Add pose publisher plugin to fire model with explicit world frame
+    plugin_elem = ET.SubElement(fire_model, 'plugin')
+    plugin_elem.set('filename', 'libignition-gazebo-pose-publisher-system.so')
+    plugin_elem.set('name', 'ignition::gazebo::systems::PosePublisher')
+    frame_id_elem = ET.SubElement(plugin_elem, 'frame_id')
+    frame_id_elem.text = 'world'
+    publish_link_pose_elem = ET.SubElement(plugin_elem, 'publish_link_pose')
+    publish_link_pose_elem.text = 'true'
+    use_pose_vector_msg_elem = ET.SubElement(plugin_elem, 'use_pose_vector_msg')
+    use_pose_vector_msg_elem.text = 'true'
+    static_publisher_elem = ET.SubElement(plugin_elem, 'static_publisher')
+    static_publisher_elem.text = 'true'
+    static_update_frequency_elem = ET.SubElement(plugin_elem, 'static_update_frequency')
+    static_update_frequency_elem.text = '1'
+
+    # Insert fire model at the top of <world> before any tree models
+    inserted = False
+    for idx, child in enumerate(list(world_elem)):
+        if child.tag == 'model' and not child.get('name', '').startswith(MODEL_PREFIX):
+            world_elem.insert(idx, fire_model)
+            inserted = True
+            break
+    if not inserted:
+        world_elem.append(fire_model)
 
 if __name__ == "__main__":
     import argparse

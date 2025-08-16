@@ -3,7 +3,7 @@ import numpy as np
 from dqn_agent import DQNAgent
 
 # Initialize agent
-agent = DQNAgent(input_size=4, num_actions=5)
+agent = DQNAgent(input_size=4, num_actions=4)
 
 # Load replay buffer
 agent.memory.load('replay_buffer.pkl')

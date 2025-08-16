@@ -2,6 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray, Float32, Bool
+from geometry_msgs.msg import PointStamped
 import numpy as np
 import math
 
@@ -13,20 +14,23 @@ class RewardPublisherNode(Node):
         self.declare_parameter('max_steps_per_episode', 1000)
         self.declare_parameter('exploration_reward', 0.01)
         self.declare_parameter('distance_threshold', 1.2)
+        self.declare_parameter('suppression_distance', 2.0)
         self.declare_parameter('step_penalty', -0.01)
-        self.declare_parameter('coverage_threshold', 0.95)  # Added: 95% map coverage
-        
-        self.max_steps = self.get_parameter('max_steps_per_episode').value
+        self.declare_parameter('coverage_threshold', 0.95)
+        self.declare_parameter('obs_size', 5)
         self.exploration_reward = self.get_parameter('exploration_reward').value
+        self.max_steps = self.get_parameter('max_steps_per_episode').value            
         self.distance_threshold = self.get_parameter('distance_threshold').value
+        self.suppression_distance = self.get_parameter('suppression_distance').value
         self.step_penalty = self.get_parameter('step_penalty').value
         self.coverage_threshold = self.get_parameter('coverage_threshold').value
+        self.obs_size = self.get_parameter('obs_size').value
 
         # Subscribers
         self.obs_sub = self.create_subscription(
             Float32MultiArray, '/obs', self.obs_callback, 10)
         self.suppression_event_sub = self.create_subscription(
-            Bool, '/suppressed_fire_position', self.suppression_event_callback, 10)
+            PointStamped, '/suppressed_fire_position', self.suppression_event_callback, 10)
         self.all_done_sub = self.create_subscription(
             Bool, '/all_fires_suppressed', self.all_done_callback, 10)
         self.coverage_sub = self.create_subscription(
@@ -42,7 +46,7 @@ class RewardPublisherNode(Node):
         self.step_count = 0
         self.suppression_event = False
         self.all_suppressed = False
-        self.map_coverage = 0.0  # Added: Track map coverage
+        self.map_coverage = 0.0
 
         # Timer for reward computation
         self.timer = self.create_timer(0.1, self.compute_reward)
@@ -50,11 +54,10 @@ class RewardPublisherNode(Node):
         self.get_logger().info("🚀 Improved Reward Publisher Node initialized")
 
     def obs_callback(self, msg):
-        if len(msg.data) == 8:
+        if len(msg.data) == self.obs_size:
             self.current_obs = np.array(msg.data, dtype=np.float32)
-            # fire_pose = self.current_obs[5:8] # (fire_x, fire_y, fire_z) available for future use
         else:
-            self.get_logger().error(f"Invalid observation size: expected 8, got {len(msg.data)}")
+            self.get_logger().error(f"Invalid observation size: expected {self.obs_size}, got {len(msg.data)}")
             self.current_obs = None
 
     def suppression_event_callback(self, msg):
@@ -78,18 +81,17 @@ class RewardPublisherNode(Node):
         fire_size = self.current_obs[1]
         min_obstacle_distance = self.current_obs[2]
         angle_to_fire = self.current_obs[3]
-        bbox_x = self.current_obs[4] if len(self.current_obs) > 4 else 0.5
-        # Optionally use bbox_x for reward shaping (e.g., bonus for centering fire)
-
+        fire_distance = self.current_obs[4]
+        
         reward = 0.0
         done = False
 
         # 1. FIRE DETECTION REWARD
         if fire_or_no > 0.5:
             # Proximity bonus: if robot is close to fire, give extra reward
-            if min_obstacle_distance < self.distance_threshold:
+            if fire_distance < self.suppression_distance:
                 reward += 5.0
-                self.get_logger().info("🔥 Fire detected and close! Proximity bonus applied.")
+                self.get_logger().info(f"🔥 Fire detected and within {self.suppression_distance}m! Proximity bonus applied.")
             else:
                 reward += 2.0
         else:
@@ -108,16 +110,10 @@ class RewardPublisherNode(Node):
             else:
                 reward -= 0.2
 
-        # 2b. CAMERA ALIGNMENT REWARD (bonus for centering fire in camera)
-        if fire_or_no > 0.5:
-            if abs(bbox_x - 0.5) < 0.05:
-                reward += 0.5
-                self.get_logger().info("🎯 Fire centered in camera!")
-
         # 3. FIRE SUPPRESSION REWARD
-        if hasattr(self, 'suppression_event') and self.suppression_event and fire_or_no > 0.5 and min_obstacle_distance < self.distance_threshold:
+        if self.suppression_event and fire_or_no > 0.5 and fire_distance < self.suppression_distance:
             reward += 20.0
-            self.get_logger().info("🔥 Fire successfully suppressed!")
+            self.get_logger().info(f"🔥 Fire successfully suppressed within {self.suppression_distance}m!")
             self.suppression_event = False
 
         # 4. ALL FIRES SUPPRESSED AND MAP COVERED
@@ -143,12 +139,8 @@ class RewardPublisherNode(Node):
         if fire_size < 0.01 and min_obstacle_distance > 0.8:
             reward += self.exploration_reward
 
-        # 8. TIMEOUT CHECK
+        # Removed: Timeout check
         self.step_count += 1
-        if self.step_count >= self.max_steps:
-            reward -= 5.0
-            done = True
-            self.get_logger().info("Episode timeout")
 
         # Publish results
         self.reward_pub.publish(Float32(data=reward))
