@@ -13,7 +13,7 @@ class FireSuppressionHandler(Node):
         super().__init__('fire_suppression_handler')
         self.suppression_mode = False
         # Parameters
-        self.declare_parameter('fov_deg', 60.0)
+        self.declare_parameter('fov_deg', 66.0)
         self.declare_parameter('max_range', 6.0)
         self.declare_parameter('world_name', 'forest_world')
         self.declare_parameter('debug_detection', True)
