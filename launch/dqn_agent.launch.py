@@ -54,7 +54,7 @@ def generate_launch_description():
             name='fire_suppression_handler',
             output='screen',
             parameters=[
-                {'fov_deg': 30.0},
+                {'fov_deg': 66.0},
                 {'max_range': 6.0},
                 {'world_name': 'forest_world'},
                 {'debug_detection': True}

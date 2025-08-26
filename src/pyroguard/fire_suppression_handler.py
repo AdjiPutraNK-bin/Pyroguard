@@ -2,7 +2,7 @@
 import rclpy
 import math
 from rclpy.node import Node
-from std_msgs.msg import Bool, Int32
+from std_msgs.msg import Bool, Int32, Float32
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PointStamped
 from rclpy.executors import MultiThreadedExecutor
@@ -32,6 +32,8 @@ class FireSuppressionHandler(Node):
         self.suppressed_count = 0  # Track number of suppressed fires
         self.last_suppression_time = self.get_clock().now()
         self.current_fire_position = None
+        # Timer for periodic fire distance publishing
+        self.create_timer(0.5, self.publish_fire_distance)
 
         # Subscriptions
         self.create_subscription(Bool, '/suppression_mode', self.suppression_mode_callback, 10)
@@ -43,6 +45,7 @@ class FireSuppressionHandler(Node):
         self.all_done_pub = self.create_publisher(Bool, '/all_fires_suppressed', 10)
         self.suppressed_count_pub = self.create_publisher(Int32, '/suppressed_fire_count', 10)
         self.suppressed_fire_pub = self.create_publisher(PointStamped, '/suppressed_fire_position', 10)
+        self.fire_distance_pub = self.create_publisher(Float32, '/fire_distance', 10)
 
         self.get_logger().info("🚀 Fire Suppression Handler Node initialized")
 
@@ -51,7 +54,7 @@ class FireSuppressionHandler(Node):
 
     def fire_position_callback(self, msg: PointStamped):
         self.current_fire_position = (msg.point.x, msg.point.y)
-        self.get_logger().info(f"Updated current fire position: ({msg.point.x:.2f}, {msg.point.y:.2f})")
+        self.get_logger().info(f"Updated current fire position: ({msg.point.x:.2f}, {msg.point.y:.2f})", throttle_duration_sec=2.0)
 
     def trigger_cb(self, msg: Bool):
         if not msg.data:
@@ -66,7 +69,7 @@ class FireSuppressionHandler(Node):
         if self.current_fire_position is None:
             self.get_logger().warning("No current fire position available for suppression")
             return
-        self.get_logger().info("Trigger received - attempting suppression")
+        self.get_logger().info("Trigger received - attempting suppression", throttle_duration_sec=2.0)
         self.select_and_suppress_fire()
         self.last_suppression_time = current_time
 
@@ -74,9 +77,12 @@ class FireSuppressionHandler(Node):
         rx = self.odom.position.x
         ry = self.odom.position.y
         dist = math.hypot(self.current_fire_position[0] - rx, self.current_fire_position[1] - ry)
+        # Publish fire distance every time suppression is attempted (still keep for immediate feedback)
+        self.fire_distance_pub.publish(Float32(data=dist))
         if dist <= self.suppression_distance:
             self.get_logger().info(
-                f"Suppressing fire at dist {dist:.2f}m"
+                f"Suppressing fire at dist {dist:.2f}m",
+                throttle_duration_sec=2.0
             )
             self.suppressed_fires.append(self.current_fire_position)
             self.suppressed_count += 1
@@ -96,8 +102,17 @@ class FireSuppressionHandler(Node):
                 self.get_logger().info(f"🏆 All fires suppressed! Total: {self.suppressed_count}")
         else:
             self.get_logger().info(
-                f"Fire too far to suppress: {dist:.2f}m > {self.suppression_distance}m"
+                f"Fire too far to suppress: {dist:.2f}m > {self.suppression_distance}m",
+                throttle_duration_sec=2.0
             )
+
+    def publish_fire_distance(self):
+        # Periodically publish fire distance if both odom and fire position are available
+        if self.odom is not None and self.current_fire_position is not None:
+            rx = self.odom.position.x
+            ry = self.odom.position.y
+            dist = math.hypot(self.current_fire_position[0] - rx, self.current_fire_position[1] - ry)
+            self.fire_distance_pub.publish(Float32(data=dist))
 
     def odom_cb(self, msg: Odometry):
         self.odom = msg.pose.pose

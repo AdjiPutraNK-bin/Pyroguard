@@ -36,7 +36,13 @@ class YOLOv8FireDetectionNode(Node):
         self.vla_pub = self.create_publisher(Float32MultiArray, '/vla_output', 10)
 
         self.bridge = CvBridge()
+        self.fire_distance = None
+        from std_msgs.msg import Float32
+        self.create_subscription(Float32, '/fire_distance', self.fire_distance_callback, 10)
         self.get_logger().info("YOLOv8 Fire Detection Node Initialized")
+
+    def fire_distance_callback(self, msg):
+        self.fire_distance = msg.data
 
     def load_model(self, model_path):
         try:
@@ -89,14 +95,18 @@ class YOLOv8FireDetectionNode(Node):
                 x1, y1, x2, y2 = best_box
                 color = (0, 0, 255)
                 cv2.rectangle(vis_image, (x1, y1), (x2, y2), color, 2)
-                dist_text = f"fire {best_conf:.2f}"
+                # Use fire_distance for label if available
+                if self.fire_distance is not None:
+                    dist_text = f"fire {best_conf:.2f} | dist {self.fire_distance:.2f}m"
+                else:
+                    dist_text = f"fire {best_conf:.2f}"
                 cv2.putText(vis_image, dist_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 fire_detected = 1.0
                 max_confidence = best_conf
                 # Smooth bbox_x using moving average
                 self.bbox_x_history.append(best_bbox_x)
                 bbox_x = float(np.mean(self.bbox_x_history)) if self.bbox_x_history else 0.5
-                self.get_logger().info(f"Fire detected, bbox_x={bbox_x:.2f}")
+                self.get_logger().info(f"Fire detected, bbox_x={bbox_x:.2f}, distance={self.fire_distance if self.fire_distance is not None else -1.0:.2f}")
 
         cv2.imshow("YOLO Fire Detection", vis_image)
         cv2.waitKey(1)
