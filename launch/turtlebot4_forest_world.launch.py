@@ -191,25 +191,25 @@ def generate_launch_description():
                 output='screen'
             ),
             # Essential bridges only (skip the problematic controller spawner)
-            Node(
-                package='ros_gz_bridge',
-                executable='parameter_bridge',
-                name='essential_cmd_vel_bridge',
-                arguments=[
-                    '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'
-                ],
-                output='screen'
-            ),
+                Node(
+                    package='ros_gz_bridge',
+                    executable='parameter_bridge',
+                    name='essential_cmd_vel_bridge',
+                    arguments=[
+                        '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'
+                    ],
+                    output='screen'
+                ),
             # Model-specific cmd_vel bridge for TurtleBot4
-            Node(
-                package='ros_gz_bridge',
-                executable='parameter_bridge',
-                name='model_cmd_vel_bridge',
-                arguments=[
-                    '/model/turtlebot4/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'
-                ],
-                output='screen'
-            ),
+            # Node(
+            #     package='ros_gz_bridge',
+            #     executable='parameter_bridge',
+            #     name='model_cmd_vel_bridge',
+            #     arguments=[
+            #         '/model/turtlebot4/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'
+            #     ],
+            #     output='screen'
+            # ),
         ]
     )
     
@@ -259,20 +259,20 @@ def generate_launch_description():
 
 
     # Add explicit cmd_vel bridges for both topics
-    cmd_vel_bridge = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
-        name='cmd_vel_bridge',
-        arguments=['/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'],
-        output='screen'
-    )
-    model_cmd_vel_bridge_explicit = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
-        name='model_cmd_vel_bridge_explicit',
-        arguments=['/model/turtlebot4/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'],
-        output='screen'
-    )
+    # cmd_vel_bridge = Node(
+    #     package='ros_gz_bridge',
+    #     executable='parameter_bridge',
+    #     name='cmd_vel_bridge',
+    #     arguments=['/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'],
+    #     output='screen'
+    # )
+    # model_cmd_vel_bridge_explicit = Node(
+    #     package='ros_gz_bridge',
+    #     executable='parameter_bridge',
+    #     name='model_cmd_vel_bridge_explicit',
+    #     arguments=['/model/turtlebot4/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist'],
+    #     output='screen'
+    # )
 
     return LaunchDescription([
         # Environment variables
@@ -291,13 +291,13 @@ def generate_launch_description():
         declare_yaw_cmd,
         
         # Launch sequence: World -> Clock -> Service & Pose/Odom bridges -> Custom Robot Spawn -> LiDAR -> Camera
-        turtlebot4_world_launch,
-        clock_bridge,
-        service_bridge_node,
-        pose_and_odom_bridge,
-        turtlebot4_spawn_launch,
-        lidar_bridge_node,
-        camera_bridge_node,
-        cmd_vel_bridge,
-        model_cmd_vel_bridge_explicit,
+    turtlebot4_world_launch,
+    clock_bridge,
+    service_bridge_node,
+    pose_and_odom_bridge,
+    turtlebot4_spawn_launch,
+    lidar_bridge_node,
+    camera_bridge_node,
+    # cmd_vel_bridge,
+    #model_cmd_vel_bridge_explicit,
     ])

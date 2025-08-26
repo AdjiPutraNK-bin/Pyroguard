@@ -39,7 +39,7 @@ class DQNAgentNode(Node):
         self.declare_parameter('epsilon_end', 0.05)
         self.declare_parameter('epsilon_decay', 1000)
         self.declare_parameter('save_interval', 1000)
-        self.declare_parameter('min_safe_distance', 0.4)  # Increased for wider arcs
+        self.declare_parameter('min_safe_distance', 1.0)  # Increased for wider arcs
         self.declare_parameter('suppression_distance', 4.0)
         self.declare_parameter('action_repeat_penalty', -0.5)
         self.declare_parameter('mode', 'train_online')
@@ -134,6 +134,10 @@ class DQNAgentNode(Node):
         }
         self.get_logger().info(f"🤖 DQN Agent Node initialized in mode: {self.mode}")
 
+        # Recenter logic
+        self.recenter_checkpoints = []
+        self.last_recenter_distance = None
+
     def obs_callback(self, msg):
         if len(msg.data) == self.obs_size:
             self.current_obs = np.array(msg.data, dtype=np.float32)
@@ -191,78 +195,30 @@ class DQNAgentNode(Node):
 
     def get_avoidance_cmd(self):
         cmd = Twist()
-        # Ensure lidar_ranges is available
+        # Sector division: left, center, right
         if self.lidar_ranges is None or len(self.lidar_ranges) == 0:
             cmd.linear.x = self.forward_speed
             return cmd
-
-        # Replace infinite or NaN values with a large number for safety
-        valid_ranges = np.where(np.isfinite(self.lidar_ranges), self.lidar_ranges, np.inf)
-        min_distance = np.min(valid_ranges) if len(valid_ranges) > 0 else np.inf
-
-        # Check fire detection status
-        fire_detected = self.current_obs[0] > 0.5 if self.current_obs is not None else False
-        angle_to_fire = self.current_obs[3] if self.current_obs is not None and len(self.current_obs) > 3 else 0.0
-
-        # Define angles for lidar sectors
-        angles = np.arange(self.lidar_angle_min, 
-                        self.lidar_angle_min + len(self.lidar_ranges) * self.lidar_angle_increment, 
-                        self.lidar_angle_increment)
-
-        # Define finer sectors for better obstacle detection
-        sector_size = np.pi / 6  # 30 degrees
-        sectors = [
-            (-np.pi/2, -np.pi/3),  # Left far (-90° to -60°)
-            (-np.pi/3, -np.pi/6),  # Left near (-60° to -30°)
-            (-np.pi/6, np.pi/6),   # Center (-30° to 30°)
-            (np.pi/6, np.pi/3),    # Right near (30° to 60°)
-            (np.pi/3, np.pi/2)     # Right far (60° to 90°)
-        ]
-
-        sector_dists = []
-        for start, end in sectors:
-            mask = (angles >= start) & (angles < end) & np.isfinite(self.lidar_ranges)
-            dist = np.nanmean(self.lidar_ranges[mask]) if np.any(mask) else np.inf
-            sector_dists.append(dist)
-
-        # Compute error: positive means right is clearer
-        left_dist = min(sector_dists[0], sector_dists[1])
-        right_dist = min(sector_dists[3], sector_dists[4])
-        center_dist = sector_dists[2]
-        error = right_dist - left_dist
-
-        # PID-like control for smooth turning
-        p = self.avoid_kp * error
-        d = self.avoid_kd * (error - self.avoid_last_error)
-        angular = p + d
-        self.avoid_last_error = error
-
-        # Adjust angular velocity based on obstacle proximity
+        ranges = self.lidar_ranges
+        n = len(ranges)
+        left = np.min(ranges[:n//3])
+        center = np.min(ranges[n//3:2*n//3])
+        right = np.min(ranges[2*n//3:])
+        min_distance = min(left, center, right)
+        self.get_logger().info(f"[AVOID] min_dist={min_distance:.2f} left={left:.2f} center={center:.2f} right={right:.2f}")
         if min_distance < self.min_safe_distance:
-            # Very close: stop and turn sharply
             cmd.linear.x = 0.0
-            cmd.angular.z = self.avoidance_max_angular if angular > 0 else -self.avoidance_max_angular
-        elif min_distance < self.avoidance_arc_margin:
-            # Create wider arc: slower speed, stronger turn
-            cmd.linear.x = max(0.1, min(self.forward_speed, min_distance * 0.25))
-            angular_magnitude = min(self.avoidance_max_angular, abs(angular) * (self.avoidance_arc_margin - min_distance) / self.avoidance_arc_margin)
-            cmd.angular.z = angular_magnitude if angular > 0 else -angular_magnitude
-        else:
-            # Open space: move forward with gentle correction
+            # Turn away from closest sector
+            if left < right and left < center:
+                cmd.angular.z = self.turn_speed
+            elif right < left and right < center:
+                cmd.angular.z = -self.turn_speed
+            else:
+                # If center is closest turn
+                cmd.angular.z = self.turn_speed 
+
             cmd.linear.x = self.forward_speed
-            cmd.angular.z = max(-self.avoidance_max_angular, min(self.avoidance_max_angular, angular * 0.5))
-
-        # Bias toward fire if detected
-        if fire_detected:
-            fire_bias = 0.4 * angle_to_fire
-            cmd.angular.z += fire_bias
-            cmd.angular.z = max(-self.avoidance_max_angular, min(self.avoidance_max_angular, cmd.angular.z))
-
-        self.get_logger().debug(
-            f"[AVOID] min_dist={min_distance:.2f} left={left_dist:.2f} right={right_dist:.2f} "
-            f"center={center_dist:.2f} angular={cmd.angular.z:.2f} linear={cmd.linear.x:.2f}"
-        )
-
+            cmd.angular.z = 0.0
         return cmd
 
     def select_rl_action(self):
@@ -387,8 +343,37 @@ class DQNAgentNode(Node):
             stable_fire_detected = False
 
         # Only consider unsuppressed fires
-        if current_fire_position and current_fire_position in self.suppressed_fire_positions:
+        def is_suppressed(pos):
+            for s in self.suppressed_fire_positions:
+                if s and pos and math.dist(s, pos) < 0.2:
+                    return True
+            return False
+        if current_fire_position and is_suppressed(current_fire_position):
             stable_fire_detected = False
+
+        # --- RECENTER LOGIC ---
+        if self.approach_mode and fire_distance < self.suppression_distance:
+            if self.last_recenter_distance is None:
+                self.last_recenter_distance = fire_distance
+                self.recenter_checkpoints = [fire_distance * (2/3), fire_distance * (1/3)]
+            # Check if we passed a recenter checkpoint
+            if self.recenter_checkpoints and fire_distance <= self.recenter_checkpoints[0]:
+                self.get_logger().info(f"🔄 Recentering to fire at distance {fire_distance:.2f} (checkpoint {self.recenter_checkpoints[0]:.2f})")
+                # Command to turn to angle 0
+                angle_to_fire = self.current_obs[3]
+                if abs(angle_to_fire) > self.angle_threshold:
+                    twist = Twist()
+                    twist.linear.x = 0.0
+                    # Make turning after suppression shorter (reduce speed)
+                    twist.angular.z = (self.turn_speed * 0.5) if angle_to_fire > 0 else -(self.turn_speed * 0.5)
+                    self.cmd_pub.publish(twist)
+                    return  # Skip RL for this tick
+                # Remove this checkpoint
+                self.recenter_checkpoints.pop(0)
+        else:
+            self.last_recenter_distance = None
+            self.recenter_checkpoints = []
+        # --- END RECENTER LOGIC ---
 
         if stable_fire_detected and not self.suppression_mode and not self.approach_mode:
             self.get_logger().info("🔥 Stable fire detected, entering approach mode")
@@ -398,8 +383,18 @@ class DQNAgentNode(Node):
             self.vla_pub.publish(Bool(data=False))
         elif self.approach_mode:
             if stable_fire_detected and fire_distance <= self.suppression_distance:
-                self.get_logger().info("🟢 Fire suppressed, resuming RL")
-                # Stop the robot
+                self.get_logger().info("🟢 Fire suppressed, turning away for 2 seconds")
+                # Turn away (random left or right) for 2 seconds
+                # if np.random.rand() > 0.5 else -self.turn_speed
+                turn_direction = -self.turn_speed 
+                turn_msg = Twist()
+                turn_msg.linear.x = 0.0
+                turn_msg.angular.z = turn_direction
+                turn_end_time = time.time() + 3.0
+                while time.time() < turn_end_time:
+                    self.cmd_pub.publish(turn_msg)
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                # Stop the robot after turning
                 stop_msg = Twist()
                 stop_msg.linear.x = 0.0
                 stop_msg.angular.z = 0.0
