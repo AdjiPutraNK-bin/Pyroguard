@@ -18,12 +18,19 @@ class LidarVlaProcessorNode(Node):
         self.declare_parameter('lidar_topic', '/world/forest_world/model/turtlebot4/link/lidar_link/sensor/lidar/scan')
         self.declare_parameter('world_name', 'forest_world')
         self.declare_parameter('camera_fov_deg', 60.0)  # Camera horizontal FOV in degrees
+        # Debounce / stability params to avoid rapidly changing fire positions
+        self.declare_parameter('fire_stable_frames', 3)
+        self.declare_parameter('fire_publish_rate', 2.0)  # Hz
+        self.declare_parameter('max_fire_distance', 10.0)  # clamp extreme lidar outliers
         self.min_safe_distance = self.get_parameter('min_safe_distance').value
         self.suppression_distance = self.get_parameter('suppression_distance').value
         self.lidar_topic = self.get_parameter('lidar_topic').value
         self.world_name = self.get_parameter('world_name').value
         self.camera_fov_deg = self.get_parameter('camera_fov_deg').value
         self.camera_fov_rad = math.radians(self.camera_fov_deg)
+        self.fire_stable_frames = int(self.get_parameter('fire_stable_frames').value)
+        self.fire_publish_rate = float(self.get_parameter('fire_publish_rate').value)
+        self.max_fire_distance = float(self.get_parameter('max_fire_distance').value)
 
         # Subscribers
         self.lidar_sub = self.create_subscription(
@@ -44,6 +51,10 @@ class LidarVlaProcessorNode(Node):
         self.lidar_ranges = None
         self.lidar_angle_min = None
         self.lidar_angle_increment = None
+        # Stability / publish control
+        self._stable_counter = 0
+        self._last_fire_publish_time = 0.0
+        self._last_published_distance = None
 
         # Timer for publishing observations
         self.timer = self.create_timer(0.1, self.publish_observation)
@@ -75,7 +86,10 @@ class LidarVlaProcessorNode(Node):
             return 0.0
         bbox_x = self.vla_data[3]
         normalized_x = bbox_x - 0.5
-        angle_to_fire = normalized_x * (self.camera_fov_rad / 2)
+    # Invert sign so that bbox_x > 0.5 (right of center) produces a
+    # negative angle (right), matching ROS Twist angular.z convention
+    # where positive angular.z is a left (counter-clockwise) turn.
+        angle_to_fire = -normalized_x * (self.camera_fov_rad / 2)
         return angle_to_fire
 
     def quaternion_to_yaw(self, q):
@@ -107,20 +121,37 @@ class LidarVlaProcessorNode(Node):
             self.obs_pub.publish(msg)
 
             # Publish fire position if detected
+            # Debounce publishing to avoid rapid switching. Require consecutive detections and limit publish rate.
+            now = self.get_clock().now().nanoseconds / 1e9
             if fire_or_no > 0.5 and fire_distance != float('inf') and self.robot_pose is not None:
-                rx, ry = self.robot_pose.position.x, self.robot_pose.position.y
-                yaw = self.quaternion_to_yaw(self.robot_pose.orientation)
-                fx = rx + fire_distance * math.cos(yaw + angle_to_fire)
-                fy = ry + fire_distance * math.sin(yaw + angle_to_fire)
-                fz = 1.0  # Assume ground height
-                point_msg = PointStamped()
-                point_msg.header.stamp = self.get_clock().now().to_msg()
-                point_msg.header.frame_id = 'map'
-                point_msg.point.x = fx
-                point_msg.point.y = fy
-                point_msg.point.z = fz
-                self.fire_position_pub.publish(point_msg)
-                self.get_logger().info(f"Published fire position: ({fx:.2f}, {fy:.2f}, {fz:.2f})")
+                # clamp obviously-large lidar readings
+                if fire_distance > self.max_fire_distance:
+                    self.get_logger().debug(f"Clamping fire_distance {fire_distance:.2f} to max {self.max_fire_distance:.2f}")
+                    fire_distance = self.max_fire_distance
+
+                self._stable_counter += 1
+                publish_allowed = (now - self._last_fire_publish_time) >= (1.0 / max(0.001, self.fire_publish_rate))
+                if self._stable_counter >= self.fire_stable_frames and publish_allowed:
+                    rx, ry = self.robot_pose.position.x, self.robot_pose.position.y
+                    yaw = self.quaternion_to_yaw(self.robot_pose.orientation)
+                    fx = rx + fire_distance * math.cos(yaw + angle_to_fire)
+                    fy = ry + fire_distance * math.sin(yaw + angle_to_fire)
+                    fz = 1.0  # Assume ground height
+                    point_msg = PointStamped()
+                    point_msg.header.stamp = self.get_clock().now().to_msg()
+                    point_msg.header.frame_id = 'map'
+                    point_msg.point.x = fx
+                    point_msg.point.y = fy
+                    point_msg.point.z = fz
+                    self.fire_position_pub.publish(point_msg)
+                    self._last_fire_publish_time = now
+                    self._last_published_distance = fire_distance
+                    self.get_logger().info(f"Published fire position: ({fx:.2f}, {fy:.2f}, {fz:.2f})")
+                    # keep stable_counter at threshold so small fluctuations don't require re-accumulation
+                    self._stable_counter = self.fire_stable_frames
+            else:
+                # Reset stability counter if detection lost or invalid
+                self._stable_counter = 0
 
 def main(args=None):
     rclpy.init(args=args)

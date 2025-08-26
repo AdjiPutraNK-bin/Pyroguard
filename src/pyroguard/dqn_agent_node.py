@@ -10,6 +10,7 @@ from geometry_msgs.msg import Twist
 from .dqn_agent import DQNAgent
 from collections import deque
 import math
+import time
 
 class DQNAgentNode(Node):
 
@@ -20,6 +21,7 @@ class DQNAgentNode(Node):
         self.detected_fire_positions = []
         self.suppression_mode_pub = self.create_publisher(Bool, '/suppression_mode', 10)
         self.vla_pub = self.create_publisher(Bool, '/trigger_vla', 10)
+        self.suppressed_fires_pub = self.create_publisher(Float32MultiArray, '/suppressed_fires', 10)
 
         # Debounce buffer for fire detection
         self.fire_detected_buffer = deque([False]*5, maxlen=5)
@@ -47,6 +49,8 @@ class DQNAgentNode(Node):
         self.declare_parameter('forward_speed', 0.3)
         self.declare_parameter('avoidance_arc_margin', 0.8)  # Distance for wide arcs
         self.declare_parameter('avoidance_max_angular', 0.7)  # Max angular velocity for avoidance
+        self.declare_parameter('target_lock_threshold', 0.7)  # Confidence threshold to lock onto a fire
+        self.declare_parameter('min_suppression_time', 5.0)   # Minimum time to focus on a fire before switching
 
         # Retrieve parameters
         self.obs_size = self.get_parameter('obs_size').value
@@ -66,6 +70,8 @@ class DQNAgentNode(Node):
         self.forward_speed = self.get_parameter('forward_speed').value
         self.avoidance_arc_margin = self.get_parameter('avoidance_arc_margin').value
         self.avoidance_max_angular = self.get_parameter('avoidance_max_angular').value
+        self.target_lock_threshold = self.get_parameter('target_lock_threshold').value
+        self.min_suppression_time = self.get_parameter('min_suppression_time').value
 
         if self.mode not in ['collect', 'train_online', 'inference']:
             raise ValueError("Invalid mode: choose 'collect', 'train_online', or 'inference'")
@@ -113,6 +119,12 @@ class DQNAgentNode(Node):
         self.action_counts = {i: 0 for i in range(self.action_size)}
         self.stuck_counter = 0
 
+        # Fire tracking
+        self.current_target_fire = None  # (x, y) of the target fire in world coordinates
+        self.target_lock_start_time = None  # When we locked onto the current target
+        self.target_lock_threshold = self.target_lock_threshold
+        self.min_suppression_time = self.min_suppression_time
+
         # Action map
         self.action_map = {
             0: "move_forward",
@@ -150,6 +162,9 @@ class DQNAgentNode(Node):
             self.locked_angle = 0.0
             self.avoid_last_error = 0.0
             self.suppression_mode_pub.publish(Bool(data=False))
+            # Reset fire locking
+            self.current_target_fire = None
+            self.target_lock_start_time = None
 
     def lidar_callback(self, msg):
         self.lidar_ranges = np.array(msg.ranges, dtype=np.float32)
@@ -320,10 +335,10 @@ class DQNAgentNode(Node):
             cmd.angular.z = 0.0
         elif action_name == "turn_left":
             cmd.linear.x = 0.05
-            cmd.angular.z = self.turn_speed
+            cmd.angular.z = -self.turn_speed
         elif action_name == "turn_right":
             cmd.linear.x = 0.05
-            cmd.angular.z = -self.turn_speed
+            cmd.angular.z = self.turn_speed
         elif action_name == "stop":
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
@@ -334,15 +349,42 @@ class DQNAgentNode(Node):
             self.get_logger().warning("No observation received, skipping control loop")
             return
 
-        self.get_logger().info(f"[DEBUG] current_obs: {self.current_obs}")
-        self.get_logger().info(f"[DEBUG] fire_detected_buffer: {list(self.fire_detected_buffer)}")
-
         fire_detected = self.current_obs[0] > 0.5
         self.fire_detected_buffer.append(fire_detected)
         stable_fire_detected = sum(self.fire_detected_buffer) >= 3
 
         fire_distance = self.current_obs[4] if len(self.current_obs) >= 5 else 999.0
         current_fire_position = tuple(self.current_obs[1:3]) if len(self.current_obs) >= 3 else None
+
+        # Check if we should lock onto a new fire
+        current_time = time.time()
+        if (stable_fire_detected and not self.suppression_mode and not self.approach_mode and
+            current_fire_position and current_fire_position not in self.suppressed_fire_positions):
+            
+            # Check if we should switch to a new target fire
+            if self.current_target_fire is None:
+                # No current target, lock onto this fire
+                self.current_target_fire = current_fire_position
+                self.target_lock_start_time = current_time
+                self.get_logger().info(f"🔒 Locked onto new target fire at {self.current_target_fire}")
+            else:
+                # Check if we should switch to a closer fire
+                current_target_distance = math.dist(self.current_target_fire, (0, 0))  # Simplified distance calculation
+                new_fire_distance = math.dist(current_fire_position, (0, 0))
+                
+                # Switch if new fire is significantly closer or if we've been on current target too long
+                time_on_target = current_time - self.target_lock_start_time
+                if (new_fire_distance < current_target_distance * 0.7 or 
+                    time_on_target > self.min_suppression_time * 2):
+                    self.current_target_fire = current_fire_position
+                    self.target_lock_start_time = current_time
+                    self.get_logger().info(f"🔁 Switching to new target fire at {self.current_target_fire}")
+
+        # Only consider the current target fire for approach and suppression
+        if (self.current_target_fire is not None and current_fire_position is not None and
+            math.dist(self.current_target_fire, current_fire_position) > 0.5):  # Position tolerance
+            # This is not our target fire, ignore for suppression purposes
+            stable_fire_detected = False
 
         # Only consider unsuppressed fires
         if current_fire_position and current_fire_position in self.suppressed_fire_positions:
@@ -365,6 +407,12 @@ class DQNAgentNode(Node):
                 # Mark fire as suppressed
                 if current_fire_position and current_fire_position not in self.suppressed_fire_positions:
                     self.suppressed_fire_positions.append(current_fire_position)
+                    # Publish suppressed fires list
+                    msg = Float32MultiArray()
+                    msg.data = []
+                    for pos in self.suppressed_fire_positions:
+                        msg.data.extend(pos)
+                    self.suppressed_fires_pub.publish(msg)
                 # Remove suppressed fire from detection
                 self.detected_fire_positions = [pos for pos in self.detected_fire_positions if pos != current_fire_position]
                 # Reset suppression and approach so RL continues
@@ -372,6 +420,9 @@ class DQNAgentNode(Node):
                 self.suppression_mode = False
                 self.suppression_mode_pub.publish(Bool(data=False))
                 self.vla_pub.publish(Bool(data=False))
+                # Release target lock
+                self.current_target_fire = None
+                self.target_lock_start_time = None
             elif not stable_fire_detected:
                 self.get_logger().info("🟢 Fire lost during approach, exiting approach mode")
                 self.approach_mode = False
@@ -384,10 +435,6 @@ class DQNAgentNode(Node):
                 self.suppression_mode = False
                 self.suppression_mode_pub.publish(Bool(data=False))
                 self.vla_pub.publish(Bool(data=False))
-
-        # Remove suppressed fires from detection
-        if current_fire_position and current_fire_position in self.suppressed_fire_positions:
-            self.detected_fire_positions = [pos for pos in self.detected_fire_positions if pos != current_fire_position]
 
         action, action_name, cmd = self.select_rl_action()
         self.cmd_pub.publish(cmd)
