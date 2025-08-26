@@ -14,7 +14,7 @@ class LidarVlaProcessorNode(Node):
         
         # Parameters
         self.declare_parameter('min_safe_distance', 0.3)
-        self.declare_parameter('suppression_distance', 2.0)
+        self.declare_parameter('suppression_distance', 4.0)
         self.declare_parameter('lidar_topic', '/world/forest_world/model/turtlebot4/link/lidar_link/sensor/lidar/scan')
         self.declare_parameter('world_name', 'forest_world')
         self.declare_parameter('camera_fov_deg', 60.0)  # Camera horizontal FOV in degrees

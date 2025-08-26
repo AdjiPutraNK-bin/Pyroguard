@@ -14,7 +14,7 @@ class RewardPublisherNode(Node):
         self.declare_parameter('max_steps_per_episode', 1000)
         self.declare_parameter('exploration_reward', 0.01)
         self.declare_parameter('distance_threshold', 1.2)
-        self.declare_parameter('suppression_distance', 2.0)
+        self.declare_parameter('suppression_distance', 4.0)
         self.declare_parameter('step_penalty', -0.01)
         self.declare_parameter('coverage_threshold', 0.95)
         self.declare_parameter('obs_size', 5)

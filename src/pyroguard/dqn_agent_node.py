@@ -12,8 +12,12 @@ from collections import deque
 import math
 
 class DQNAgentNode(Node):
+
     def __init__(self):
         super().__init__('dqn_agent_node')
+        # Track suppressed and detected fire positions
+        self.suppressed_fire_positions = []
+        self.detected_fire_positions = []
         self.suppression_mode_pub = self.create_publisher(Bool, '/suppression_mode', 10)
         self.vla_pub = self.create_publisher(Bool, '/trigger_vla', 10)
 
@@ -34,7 +38,7 @@ class DQNAgentNode(Node):
         self.declare_parameter('epsilon_decay', 1000)
         self.declare_parameter('save_interval', 1000)
         self.declare_parameter('min_safe_distance', 0.4)  # Increased for wider arcs
-        self.declare_parameter('suppression_distance', 2.0)
+        self.declare_parameter('suppression_distance', 4.0)
         self.declare_parameter('action_repeat_penalty', -0.5)
         self.declare_parameter('mode', 'train_online')
         self.declare_parameter('lidar_topic', '/world/forest_world/model/turtlebot4/link/lidar_link/sensor/lidar/scan')
@@ -172,21 +176,23 @@ class DQNAgentNode(Node):
 
     def get_avoidance_cmd(self):
         cmd = Twist()
-        if self.lidar_ranges is None or self.current_obs is None:
-            return cmd
-
-        min_distance = self.current_obs[2]
-        angle_to_fire = float(self.current_obs[3])
-        fire_detected = self.current_obs[0] > 0.5
-
-        valid_ranges = self.lidar_ranges[np.isfinite(self.lidar_ranges)]
-        if len(valid_ranges) == 0:
+        # Ensure lidar_ranges is available
+        if self.lidar_ranges is None or len(self.lidar_ranges) == 0:
             cmd.linear.x = self.forward_speed
             return cmd
 
+        # Replace infinite or NaN values with a large number for safety
+        valid_ranges = np.where(np.isfinite(self.lidar_ranges), self.lidar_ranges, np.inf)
+        min_distance = np.min(valid_ranges) if len(valid_ranges) > 0 else np.inf
+
+        # Check fire detection status
+        fire_detected = self.current_obs[0] > 0.5 if self.current_obs is not None else False
+        angle_to_fire = self.current_obs[3] if self.current_obs is not None and len(self.current_obs) > 3 else 0.0
+
+        # Define angles for lidar sectors
         angles = np.arange(self.lidar_angle_min, 
-                         self.lidar_angle_min + len(self.lidar_ranges) * self.lidar_angle_increment, 
-                         self.lidar_angle_increment)
+                        self.lidar_angle_min + len(self.lidar_ranges) * self.lidar_angle_increment, 
+                        self.lidar_angle_increment)
 
         # Define finer sectors for better obstacle detection
         sector_size = np.pi / 6  # 30 degrees
@@ -336,6 +342,11 @@ class DQNAgentNode(Node):
         stable_fire_detected = sum(self.fire_detected_buffer) >= 3
 
         fire_distance = self.current_obs[4] if len(self.current_obs) >= 5 else 999.0
+        current_fire_position = tuple(self.current_obs[1:3]) if len(self.current_obs) >= 3 else None
+
+        # Only consider unsuppressed fires
+        if current_fire_position and current_fire_position in self.suppressed_fire_positions:
+            stable_fire_detected = False
 
         if stable_fire_detected and not self.suppression_mode and not self.approach_mode:
             self.get_logger().info("🔥 Stable fire detected, entering approach mode")
@@ -345,11 +356,22 @@ class DQNAgentNode(Node):
             self.vla_pub.publish(Bool(data=False))
         elif self.approach_mode:
             if stable_fire_detected and fire_distance <= self.suppression_distance:
-                self.get_logger().info("🟢 Fire suppressed, entering suppression mode")
+                self.get_logger().info("🟢 Fire suppressed, resuming RL")
+                # Stop the robot
+                stop_msg = Twist()
+                stop_msg.linear.x = 0.0
+                stop_msg.angular.z = 0.0
+                self.cmd_pub.publish(stop_msg)
+                # Mark fire as suppressed
+                if current_fire_position and current_fire_position not in self.suppressed_fire_positions:
+                    self.suppressed_fire_positions.append(current_fire_position)
+                # Remove suppressed fire from detection
+                self.detected_fire_positions = [pos for pos in self.detected_fire_positions if pos != current_fire_position]
+                # Reset suppression and approach so RL continues
                 self.approach_mode = False
-                self.suppression_mode = True
-                self.suppression_mode_pub.publish(Bool(data=True))
-                self.vla_pub.publish(Bool(data=True))
+                self.suppression_mode = False
+                self.suppression_mode_pub.publish(Bool(data=False))
+                self.vla_pub.publish(Bool(data=False))
             elif not stable_fire_detected:
                 self.get_logger().info("🟢 Fire lost during approach, exiting approach mode")
                 self.approach_mode = False
@@ -362,6 +384,10 @@ class DQNAgentNode(Node):
                 self.suppression_mode = False
                 self.suppression_mode_pub.publish(Bool(data=False))
                 self.vla_pub.publish(Bool(data=False))
+
+        # Remove suppressed fires from detection
+        if current_fire_position and current_fire_position in self.suppressed_fire_positions:
+            self.detected_fire_positions = [pos for pos in self.detected_fire_positions if pos != current_fire_position]
 
         action, action_name, cmd = self.select_rl_action()
         self.cmd_pub.publish(cmd)
@@ -380,9 +406,11 @@ class DQNAgentNode(Node):
                 self.stuck_counter = max(0, self.stuck_counter - 1)
 
             if self.mode != 'inference':
-                self.agent.memory.push(
-                    self.previous_obs, action if action is not None else -1, adjusted_reward, self.current_obs, self.done
-                )
+                # Only push valid actions to replay buffer
+                if action is not None and 0 <= action < self.action_size:
+                    self.agent.memory.push(self.previous_obs, action, adjusted_reward, self.current_obs, self.done)
+                else:
+                    self.get_logger().debug(f"Invalid action index: {action}, skipping memory push.")
 
             if self.mode == 'train_online':
                 loss = self.agent.train_step()

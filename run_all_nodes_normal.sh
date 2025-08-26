@@ -2,6 +2,7 @@
 # Run all Pyroguard nodes in separate normal terminal windows
 # Usage: bash run_all_nodes_normal.sh
 
+export CUDA_LAUNCH_BLOCKING=1
 # Each command to run in a separate terminal
 NODES=(
   "source ~/.bashrc && source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash && ros2 run pyroguard image_preprocessor_node"

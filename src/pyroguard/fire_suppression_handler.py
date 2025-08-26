@@ -17,7 +17,7 @@ class FireSuppressionHandler(Node):
         self.declare_parameter('max_range', 6.0)
         self.declare_parameter('world_name', 'forest_world')
         self.declare_parameter('debug_detection', True)
-        self.declare_parameter('suppression_distance', 2.0)  # Universal suppression distance
+        self.declare_parameter('suppression_distance', 4.0)  # Universal suppression distance
         self.declare_parameter('num_fires', 8)  # Total number of fires
         self.fov_deg = self.get_parameter('fov_deg').value
         self.max_range = self.get_parameter('max_range').value
