@@ -108,6 +108,13 @@ class YOLOv8FireDetectionNode(Node):
                 bbox_x = float(np.mean(self.bbox_x_history)) if self.bbox_x_history else 0.5
                 self.get_logger().info(f"Fire detected, bbox_x={bbox_x:.2f}, distance={self.fire_distance if self.fire_distance is not None else -1.0:.2f}")
 
+        # Draw green label at bottom left with confidence and fire distance
+        green = (0, 255, 0)
+        gui_text = f"Confidence: {max_confidence:.2f} | Fire Dist: {self.fire_distance if self.fire_distance is not None else '-'} m"
+        text_x = 10
+        text_y = vis_image.shape[0] - 10
+        cv2.putText(vis_image, gui_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, green, 2)
+
         cv2.imshow("YOLO Fire Detection", vis_image)
         cv2.waitKey(1)
 
