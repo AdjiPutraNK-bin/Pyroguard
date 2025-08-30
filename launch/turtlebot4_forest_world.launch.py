@@ -13,7 +13,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 def generate_launch_description():
     # Paths and configurations
     package_share_dir = get_package_share_directory('pyroguard')
-    world_path = os.path.join(package_share_dir, 'worlds', 'forest.sdf')
+    world_path = os.path.join(package_share_dir, 'worlds', 'forest.pruned.sdf')
     custom_gazebo_world_path = world_path
     custom_gazebo_dir = os.path.join(package_share_dir, 'worlds')
     
@@ -95,7 +95,7 @@ def generate_launch_description():
     )
     
     # Use local worlds/forest.sdf for the simulation world
-    local_world_path = os.path.join(package_share_dir, 'worlds', 'forest.sdf')
+    local_world_path = os.path.join(package_share_dir, 'worlds', 'forest.pruned.sdf')
     turtlebot4_world_launch = ExecuteProcess(
         cmd=['ign', 'gazebo', '-r', local_world_path],
         output='screen'

@@ -62,20 +62,17 @@ def get_next_fire_id(world_elem):
     return next_id
 
 def clean_and_add_fires(world_file, num_fire_areas=5):
-    """Clean existing fires and add new steady individual ground fires"""
-    
-    tree_positions = load_tree_positions()
-    if not tree_positions:
-        print("No tree positions available.")
-        return
-    
+    """Clean existing fires and add five steady ground fires: four inset from the
+    inner corners of the walled area and one in the center.
+    """
+
     tree = ET.parse(world_file)
     root = tree.getroot()
     world_elem = root.find('world')
     if world_elem is None:
         print("Could not find world element")
         return
-    
+
     print("Cleaning existing fires...")
     fires_removed = 0
     models_to_remove = []
@@ -94,35 +91,35 @@ def clean_and_add_fires(world_file, num_fire_areas=5):
     if removed_names:
         print(f"Removed fire models: {removed_names}")
     print(f"Removed {fires_removed} existing fires")
-    
+
+    # fixed layout: four corner fires and one center
+    half_extent = 25.95  # matches world walls
+    inset = 2.0  # meters inside the wall
+    corner_coords = [
+        (half_extent - inset, half_extent - inset),
+        (-(half_extent - inset), half_extent - inset),
+        (half_extent - inset, -(half_extent - inset)),
+        (-(half_extent - inset), -(half_extent - inset)),
+    ]
+
     fire_counter = get_next_fire_id(world_elem)
     fire_positions = []
 
-    # Set seed for reproducible randomness
-    random.seed(42)
+    # center fire
+    center = (0.0, 0.0)
 
-    # Select unique trees deterministically
-    num_areas = min(num_fire_areas, len(tree_positions))
-    selected_trees = random.sample(tree_positions, num_areas)
+    placements = corner_coords + [center]
 
-    for target_tree in selected_trees:
-        tree_x, tree_y, tree_z, tree_name = target_tree
-
-        # Deterministic angle and distance for scattering
-        angle = random.uniform(0, 2 * math.pi)
-        distance = random.uniform(2.0, 8.0)
-        ground_x = tree_x + distance * math.cos(angle)
-        ground_y = tree_y + distance * math.sin(angle)
+    for (gx, gy) in placements[:5]:
         z = GROUND_FIRE_HEIGHT
-        scale = 1.0  # Fixed scale for simplicity
-
+        scale = 1.0
         model_name = f"{MODEL_PREFIX}{fire_counter}"
-        add_single_fire(world_elem, fire_counter, ground_x, ground_y, z, scale, 'ground')
-        fire_positions.append((ground_x, ground_y, z, model_name))
+        add_single_fire(world_elem, fire_counter, gx, gy, z, scale, 'ground')
+        fire_positions.append((gx, gy, z, model_name))
         fire_counter += 1
-    
+
     tree.write(world_file, encoding='utf-8', xml_declaration=True)
-    total_fires = fire_counter - 1
+    total_fires = len(placements[:5])
     print(f"✅ Added {total_fires} new fires to {world_file}")
 
     save_fire_positions(fire_positions)
