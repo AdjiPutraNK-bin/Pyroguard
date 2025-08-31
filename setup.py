@@ -28,11 +28,12 @@ setup(
             'dqn_agent_node = pyroguard.dqn_agent_node:main',
             'image_preprocessor_node = pyroguard.image_preprocessor:main',
             'lidar_vla_processor_node = pyroguard.lidar_vla_processor:main',
-            'reward_publisher_node = pyroguard.reward_publisher:main',
+            'reward_node = pyroguard.reward_node:main',
             'fire_suppression_handler_node = pyroguard.fire_suppression_handler:main',
             'train_node = pyroguard.train:main',
             'fire_node = pyroguard.fire_node:main',
-            'map_coverage_node = pyroguard.map_coverage_node:main'
+            'map_coverage_node = pyroguard.map_coverage_node:main',
+            'test_navigation_node = pyroguard.test_navigation:main',
         ],
     },
 )

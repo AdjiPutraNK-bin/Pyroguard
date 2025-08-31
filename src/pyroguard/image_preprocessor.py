@@ -25,8 +25,6 @@ class ImagePreprocessorNode(Node):
         
         self.get_logger().info("🖼️ Image Preprocessor Node initialized")
 
-    # rqt_image_view is no longer launched automatically. Please run it manually if needed.
-
     def image_callback(self, msg):
         try:
             # Convert ROS image message to OpenCV image
@@ -41,9 +39,9 @@ class ImagePreprocessorNode(Node):
             out_msg_processed = self.bridge.cv2_to_imgmsg(processed, 'rgb8')
             self.pub_processed.publish(out_msg_processed)
             
-            # Convert to HSV and publish with correct encoding
+            # Convert to HSV and publish with correct BGR encoding
             hsv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2HSV)
-            out_msg_hsv = self.bridge.cv2_to_imgmsg(hsv_image, 'rgb8')
+            out_msg_hsv = self.bridge.cv2_to_imgmsg(hsv_image, 'bgr8')  # Use bgr8 for HSV
             self.pub_hsv.publish(out_msg_hsv)
             
         except Exception as e:

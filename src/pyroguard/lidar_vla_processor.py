@@ -11,17 +11,20 @@ import math
 class LidarVlaProcessorNode(Node):
     def __init__(self):
         super().__init__('lidar_vla_processor_node')
-        
-        # Parameters
-        self.declare_parameter('min_safe_distance', 0.3)
-        self.declare_parameter('suppression_distance', 4.0)
-        self.declare_parameter('lidar_topic', '/world/forest_world/model/turtlebot4/link/lidar_link/sensor/lidar/scan')
-        self.declare_parameter('world_name', 'forest_world')
-        self.declare_parameter('camera_fov_deg', 60.0)  # Camera horizontal FOV in degrees
-        # Debounce / stability params to avoid rapidly changing fire positions
-        self.declare_parameter('fire_stable_frames', 3)
-        self.declare_parameter('fire_publish_rate', 2.0)  # Hz
-        self.declare_parameter('max_fire_distance', 10.0)  # clamp extreme lidar outliers
+        self.declare_parameters(
+            namespace='',
+            parameters=[
+                ('min_safe_distance', 0.8),
+                ('suppression_distance', 4.0),
+                ('lidar_topic', '/world/forest_world/model/turtlebot4/link/lidar_link/sensor/lidar/scan'),
+                ('world_name', 'forest_world'),
+                ('camera_fov_deg', 60.0),
+                ('fire_stable_frames', 3),
+                ('fire_publish_rate', 2.0),
+                ('max_fire_distance', 10.0),
+                ('obs_size', 5),
+            ]
+        )
         self.min_safe_distance = self.get_parameter('min_safe_distance').value
         self.suppression_distance = self.get_parameter('suppression_distance').value
         self.lidar_topic = self.get_parameter('lidar_topic').value
@@ -31,8 +34,8 @@ class LidarVlaProcessorNode(Node):
         self.fire_stable_frames = int(self.get_parameter('fire_stable_frames').value)
         self.fire_publish_rate = float(self.get_parameter('fire_publish_rate').value)
         self.max_fire_distance = float(self.get_parameter('max_fire_distance').value)
+        self.obs_size = int(self.get_parameter('obs_size').value)
 
-        # Subscribers
         self.lidar_sub = self.create_subscription(
             LaserScan, self.lidar_topic, self.lidar_callback, 10)
         self.vla_sub = self.create_subscription(
@@ -40,33 +43,34 @@ class LidarVlaProcessorNode(Node):
         self.odom_sub = self.create_subscription(
             Odometry, '/odom', self.odom_callback, 10)
 
-        # Publishers
         self.obs_pub = self.create_publisher(Float32MultiArray, '/obs', 10)
         self.fire_position_pub = self.create_publisher(PointStamped, '/fire_position', 10)
 
-        # State
-        self.vla_data = None  # [fire_or_no, fire_size, -1, bbox_x]
+        self.vla_data = None
         self.lidar_min_distance = float('inf')
         self.robot_pose = None
         self.lidar_ranges = None
         self.lidar_angle_min = None
         self.lidar_angle_increment = None
-        # Stability / publish control
         self._stable_counter = 0
         self._last_fire_publish_time = 0.0
         self._last_published_distance = None
 
-        # Timer for publishing observations
         self.timer = self.create_timer(0.1, self.publish_observation)
         
         self.get_logger().info("🚀 LIDAR-VLA Processor Node initialized")
 
     def lidar_callback(self, msg):
-        self.lidar_ranges = np.array(msg.ranges)
-        self.lidar_angle_min = msg.angle_min
-        self.lidar_angle_increment = msg.angle_increment
-        finite_ranges = self.lidar_ranges[np.isfinite(self.lidar_ranges)]
-        self.lidar_min_distance = float(np.min(finite_ranges)) if len(finite_ranges) > 0 else float('inf')
+        try:
+            self.lidar_ranges = np.array(msg.ranges)
+            self.lidar_angle_min = msg.angle_min
+            self.lidar_angle_increment = msg.angle_increment
+            finite_ranges = self.lidar_ranges[np.isfinite(self.lidar_ranges)]
+            self.lidar_min_distance = float(np.min(finite_ranges)) if len(finite_ranges) > 0 else float('inf')
+        except Exception as e:
+            self.get_logger().error(f"LIDAR callback failed: {str(e)}")
+            self.lidar_ranges = None
+            self.lidar_min_distance = float('inf')
 
     def vla_callback(self, msg):
         if len(msg.data) >= 4:
@@ -76,67 +80,75 @@ class LidarVlaProcessorNode(Node):
             self.vla_data = None
 
     def odom_callback(self, msg):
-        self.robot_pose = msg.pose.pose
-        if not hasattr(self, '_robot_frame_logged'):
-            self.get_logger().info(f"Robot odometry frame: {msg.header.frame_id}")
-            self._robot_frame_logged = True
+        try:
+            self.robot_pose = msg.pose.pose
+            if not hasattr(self, '_robot_frame_logged'):
+                self.get_logger().info(f"Robot odometry frame: {msg.header.frame_id}")
+                self._robot_frame_logged = True
+        except Exception as e:
+            self.get_logger().error(f"Odometry callback failed: {str(e)}")
+            self.robot_pose = None
 
     def compute_angle_to_fire(self):
         if self.vla_data is None or len(self.vla_data) < 4:
             return 0.0
         bbox_x = self.vla_data[3]
         normalized_x = bbox_x - 0.5
-    # Invert sign so that bbox_x > 0.5 (right of center) produces a
-    # negative angle (right), matching ROS Twist angular.z convention
-    # where positive angular.z is a left (counter-clockwise) turn.
         angle_to_fire = -normalized_x * (self.camera_fov_rad / 2)
         return angle_to_fire
 
     def quaternion_to_yaw(self, q):
-        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        return math.atan2(siny_cosp, cosy_cosp)
+        try:
+            siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            return math.atan2(siny_cosp, cosy_cosp)
+        except Exception:
+            self.get_logger().error("Failed to compute yaw from quaternion")
+            return 0.0
 
     def publish_observation(self):
-        vla_available = self.vla_data is not None
-        lidar_available = self.lidar_min_distance != float('inf')
+        if self.vla_data is None or self.lidar_ranges is None or not np.any(np.isfinite(self.lidar_ranges)):
+            self.get_logger().warning("Missing VLA or LIDAR data, skipping observation")
+            return
 
-        if vla_available and lidar_available:
-            fire_or_no = self.vla_data[0]
-            fire_size = self.vla_data[1]
-            angle_to_fire = self.compute_angle_to_fire() if fire_or_no > 0.5 else 0.0
+        fire_or_no = self.vla_data[0]
+        fire_size = self.vla_data[1]
+        angle_to_fire = self.compute_angle_to_fire() if fire_or_no > 0.5 else 0.0
+        fire_distance = float('inf')
 
-            fire_distance = float('inf')
-            if fire_or_no > 0.5:
-                angle = angle_to_fire
-                if self.lidar_angle_increment != 0 and self.lidar_ranges is not None:
-                    index = int((angle - self.lidar_angle_min) / self.lidar_angle_increment)
-                    if 0 <= index < len(self.lidar_ranges) and np.isfinite(self.lidar_ranges[index]):
-                        fire_distance = self.lidar_ranges[index]
+        if fire_or_no > 0.5 and self.lidar_angle_increment != 0 and self.lidar_ranges is not None:
+            try:
+                index = int((angle_to_fire - self.lidar_angle_min) / self.lidar_angle_increment)
+                if 0 <= index < len(self.lidar_ranges) and np.isfinite(self.lidar_ranges[index]):
+                    fire_distance = self.lidar_ranges[index]
+            except Exception as e:
+                self.get_logger().error(f"Error computing fire distance: {str(e)}")
+                fire_distance = float('inf')
 
-            # Publish observation
-            obs = np.array([fire_or_no, fire_size, self.lidar_min_distance, angle_to_fire, fire_distance], dtype=np.float32)
-            msg = Float32MultiArray()
-            msg.data = obs.tolist()
-            self.obs_pub.publish(msg)
+        obs = np.array([fire_or_no, fire_size, self.lidar_min_distance, angle_to_fire, fire_distance], dtype=np.float32)
+        if len(obs) != self.obs_size:
+            self.get_logger().error(f"Invalid observation size: expected {self.obs_size}, got {len(obs)}")
+            return
 
-            # Publish fire position if detected
-            # Debounce publishing to avoid rapid switching. Require consecutive detections and limit publish rate.
-            now = self.get_clock().now().nanoseconds / 1e9
-            if fire_or_no > 0.5 and fire_distance != float('inf') and self.robot_pose is not None:
-                # clamp obviously-large lidar readings
-                if fire_distance > self.max_fire_distance:
-                    self.get_logger().debug(f"Clamping fire_distance {fire_distance:.2f} to max {self.max_fire_distance:.2f}")
-                    fire_distance = self.max_fire_distance
+        msg = Float32MultiArray()
+        msg.data = obs.tolist()
+        self.obs_pub.publish(msg)
 
-                self._stable_counter += 1
-                publish_allowed = (now - self._last_fire_publish_time) >= (1.0 / max(0.001, self.fire_publish_rate))
-                if self._stable_counter >= self.fire_stable_frames and publish_allowed:
+        now = self.get_clock().now().nanoseconds / 1e9
+        if fire_or_no > 0.5 and fire_distance != float('inf') and self.robot_pose is not None:
+            if fire_distance > self.max_fire_distance:
+                self.get_logger().debug(f"Clamping fire_distance {fire_distance:.2f} to max {self.max_fire_distance:.2f}")
+                fire_distance = self.max_fire_distance
+
+            self._stable_counter += 1
+            publish_allowed = (now - self._last_fire_publish_time) >= (1.0 / max(0.001, self.fire_publish_rate))
+            if self._stable_counter >= self.fire_stable_frames and publish_allowed:
+                try:
                     rx, ry = self.robot_pose.position.x, self.robot_pose.position.y
                     yaw = self.quaternion_to_yaw(self.robot_pose.orientation)
                     fx = rx + fire_distance * math.cos(yaw + angle_to_fire)
                     fy = ry + fire_distance * math.sin(yaw + angle_to_fire)
-                    fz = 1.0  # Assume ground height
+                    fz = 1.0
                     point_msg = PointStamped()
                     point_msg.header.stamp = self.get_clock().now().to_msg()
                     point_msg.header.frame_id = 'map'
@@ -147,11 +159,13 @@ class LidarVlaProcessorNode(Node):
                     self._last_fire_publish_time = now
                     self._last_published_distance = fire_distance
                     self.get_logger().info(f"Published fire position: ({fx:.2f}, {fy:.2f}, {fz:.2f})")
-                    # keep stable_counter at threshold so small fluctuations don't require re-accumulation
                     self._stable_counter = self.fire_stable_frames
-            else:
-                # Reset stability counter if detection lost or invalid
-                self._stable_counter = 0
+                except Exception as e:
+                    self.get_logger().error(f"Error publishing fire position: {str(e)}")
+            elif not publish_allowed:
+                self.get_logger().debug("Fire position publish skipped due to rate limit")
+        else:
+            self._stable_counter = 0
 
 def main(args=None):
     rclpy.init(args=args)
