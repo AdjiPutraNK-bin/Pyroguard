@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import os
 from std_msgs.msg import Float32MultiArray, Float32, Bool
+from std_srvs.srv import Trigger
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist, PointStamped
@@ -23,6 +24,12 @@ class DQNAgentNode(Node):
         self.fire_position_sub = self.create_subscription(PointStamped, '/fire_position', self.fire_position_callback, 10)
         self.suppressed_fire_sub = self.create_subscription(PointStamped, '/suppressed_fire_position', self.suppressed_fire_callback, 10)
         self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+
+        # Add service for getting fire detection info
+        self.fire_info_service = self.create_service(Trigger, 'get_fire_detection_info', self.handle_fire_info_request)
+        
+        # Add service for resetting mission
+        self.reset_mission_service = self.create_service(Trigger, 'reset_mission', self.handle_reset_mission_request)
 
         self.fire_detected_buffer = deque([False]*5, maxlen=5)
         self.avoid_kp = 0.8
@@ -67,10 +74,7 @@ class DQNAgentNode(Node):
                 ('avoidance_window_deg', 120.0),
                 ('path_cost_distance_weight', 0.7),
                 ('path_cost_obstacle_weight', 0.3),
-                ('return_to_base_timeout', 60.0),
-                ('visited_grid_resolution', 0.5),
-                ('visited_penalty', -2.0),
-                ('visit_decay_time', 300.0),
+                ('return_to_base_timeout', 30.0),
             ]
         )
 
@@ -189,14 +193,20 @@ class DQNAgentNode(Node):
         self.return_to_base_mode = False
         self.return_to_base_timer = self.create_timer(1.0, self.check_return_to_base)
         self.no_fire_timeout = self.return_to_base_timeout  # Use parameter value
-
-        # Visited areas tracking
-        self.visited_grid_resolution = self.get_parameter('visited_grid_resolution').value
-        self.visited_grid = {}  # Dictionary to store visited cells
-        self.visited_penalty = self.get_parameter('visited_penalty').value
-        self.visit_decay_time = self.get_parameter('visit_decay_time').value
-        self.position_history = deque(maxlen=1000)  # Keep last 1000 positions
-        self.last_position_update = None
+        
+        # Debug variables for return-to-base timing
+        self.return_to_base_start_time = None
+        self.last_new_fire_detection_time = None
+        self.debug_log_timer = self.create_timer(5.0, self.debug_return_to_base_status)
+        
+        # Search mode variables to prevent spinning
+        self.search_mode = False
+        self.search_start_time = None
+        self.last_action_time = None
+        self.spin_timeout = 10.0  # Stop spinning after 10 seconds
+        
+        # Mission complete flag
+        self.mission_complete = False
 
     def check_readiness(self):
         if self.current_obs is not None:
@@ -267,9 +277,6 @@ class DQNAgentNode(Node):
             if self.starting_position is None:
                 self.starting_position = (self.robot_pose.position.x, self.robot_pose.position.y)
                 self.get_logger().info(f"🏠 Set starting position: {self.starting_position}")
-
-            # Update visited areas tracking
-            self.update_visited_areas()
 
         except Exception as e:
             self.get_logger().error(f"Odometry callback failed: {str(e)}")
@@ -459,6 +466,33 @@ class DQNAgentNode(Node):
             return 5 if fire_distance < self.min_safe_distance * 2.0 else 0  # slow_forward or move_forward
 
     def select_smart_action(self, epsilon):
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        
+        # Check if we've been spinning too long
+        if self.last_action_time is not None:
+            time_since_last_action = current_time - self.last_action_time
+            if time_since_last_action > self.spin_timeout:
+                self.get_logger().info("🛑 Spin timeout reached, switching to search mode")
+                self.search_mode = True
+                self.search_start_time = current_time
+        
+        # If in search mode, prefer forward movement
+        if self.search_mode:
+            # Exit search mode after 30 seconds or if we detect obstacles
+            if (self.search_start_time and current_time - self.search_start_time > 30.0) or \
+               (self.current_obs is not None and self.current_obs[2] < self.min_safe_distance):
+                self.search_mode = False
+                self.search_start_time = None
+                self.get_logger().info("🔍 Exiting search mode")
+            
+            # In search mode, prefer forward actions
+            if np.random.random() < 0.7:  # 70% chance to move forward
+                return 0  # move_forward
+            else:
+                # Occasionally turn to search different areas
+                return np.random.choice([1, 2])  # turn_left or turn_right
+        
+        # Normal DQN action selection
         if np.random.random() < epsilon:
             if self.detect_circular_movement():
                 non_forward_actions = [a for a in range(self.action_size) if a not in [0, 5]]
@@ -470,11 +504,6 @@ class DQNAgentNode(Node):
             for action, count in self.action_counts.items():
                 if count > 5:
                     weights[action] *= 0.5
-            # Apply visited area penalties to exploration weights
-            for action in range(self.action_size):
-                visited_penalty = self.get_unvisited_direction_penalty(action)
-                if visited_penalty < 0:
-                    weights[action] *= max(0.1, 1.0 + visited_penalty)  # Reduce weight for visited directions
             weights /= weights.sum()
             return int(np.random.choice(self.action_size, p=weights))
         else:
@@ -485,13 +514,11 @@ class DQNAgentNode(Node):
             for action, count in self.action_counts.items():
                 if count > 10:
                     q_values_adj[0][action] -= 0.1
-            # Apply visited area penalties to Q-values
-            for action in range(self.action_size):
-                visited_penalty = self.get_unvisited_direction_penalty(action)
-                q_values_adj[0][action] += visited_penalty  # Add penalty (which is negative)
             return q_values_adj.argmax().item()
 
     def execute_action(self, action_name, action_id):
+        self.last_action_time = self.get_clock().now().nanoseconds / 1e9
+        
         cmd = Twist()
         if action_name == "move_forward":
             obstacle_dist = self.current_obs[2] if self.current_obs is not None else self.min_safe_distance
@@ -526,131 +553,153 @@ class DQNAgentNode(Node):
         return cmd
 
     def check_return_to_base(self):
-        """Check if robot should return to base due to no fire detection for timeout period"""
+        """Check if robot should return to base due to no NEW fire detection for timeout period"""
         if not self.is_ready or self.return_to_base_mode:
             return
 
         current_time = self.get_clock().now().nanoseconds / 1e9
 
-        # If we haven't detected any fire yet, don't start the timer
-        if self.last_fire_detection_time is None:
+        # If we haven't detected any NEW fire yet, don't start the timer
+        if self.last_new_fire_detection_time is None:
             return
 
-        # Check if no fire has been detected for the timeout period
-        time_since_last_fire = current_time - self.last_fire_detection_time
-        if time_since_last_fire > self.no_fire_timeout:
+        # Check if no NEW fire has been detected for the timeout period
+        time_since_last_new_fire = current_time - self.last_new_fire_detection_time
+        if time_since_last_new_fire > self.no_fire_timeout:
             if not self.return_to_base_mode:
                 self.return_to_base_mode = True
-                self.get_logger().info(f"🏠 No fire detected for {self.no_fire_timeout} seconds, initiating return to base")
+                self.return_to_base_start_time = current_time
+                self.get_logger().error(f"🚨 NO NEW FIRES FOR {self.no_fire_timeout} SECONDS - INITIATING RETURN TO BASE!")
                 # Cancel the timer to avoid repeated calls
                 if hasattr(self, 'return_to_base_timer'):
                     self.return_to_base_timer.cancel()
         else:
             # Log remaining time for debugging
-            remaining_time = self.no_fire_timeout - time_since_last_fire
+            remaining_time = self.no_fire_timeout - time_since_last_new_fire
             if remaining_time < 10:  # Only log when less than 10 seconds remaining
                 self.get_logger().debug(f"🏠 Return to base in {remaining_time:.1f} seconds")
+
+    def debug_return_to_base_status(self):
+        """Debug method to log return-to-base timing information"""
+        if not self.is_ready:
+            return
+            
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        
+        if self.return_to_base_mode and self.return_to_base_start_time is not None:
+            time_in_return_mode = current_time - self.return_to_base_start_time
+            self.get_logger().info(f"🏠 RETURN TO BASE ACTIVE: {time_in_return_mode:.1f} seconds navigating")
+        
+        if self.last_new_fire_detection_time is not None:
+            time_since_last_new_fire = current_time - self.last_new_fire_detection_time
+            remaining_time = max(0, self.no_fire_timeout - time_since_last_new_fire)
+            
+            # Show prominent countdown when close to return-to-base
+            if remaining_time <= 10 and remaining_time > 0:
+                self.get_logger().warn(f"⏰ RETURN TO BASE IN {remaining_time:.1f} SECONDS!")
+            elif remaining_time == 0:
+                self.get_logger().error("� RETURN TO BASE TIMER EXPIRED - INITIATING RETURN!")
+            else:
+                self.get_logger().info(f"🔥 Last NEW fire: {time_since_last_new_fire:.1f}s ago, return-to-base in {remaining_time:.1f}s")
+        else:
+            self.get_logger().info(f"🔥 No new fires detected yet")
+            
+        # Add search mode and spinning information
+        if self.search_mode:
+            search_duration = current_time - self.search_start_time if self.search_start_time else 0
+            self.get_logger().info(f"🔍 In search mode for {search_duration:.1f}s")
+        
+        if self.last_action_time is not None:
+            time_since_action = current_time - self.last_action_time
+            if time_since_action > 5.0:
+                self.get_logger().info(f"⚠️  No action taken for {time_since_action:.1f}s")
+        
+        self.get_logger().info(f"📋 Suppressed fires: {len(self.suppressed_fire_positions)}, Current target: {self.current_target_fire}")
+        self.get_logger().info(f"🤖 Mode: Approach={self.approach_mode}, Suppression={self.suppression_mode}, Return-to-base={self.return_to_base_mode}, Mission-Complete={self.mission_complete}")
+
+    def get_fire_detection_info(self):
+        """Get detailed information about fire detection timing"""
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        
+        info = {
+            'current_time': current_time,
+            'last_new_fire_time': self.last_new_fire_detection_time,
+            'last_any_fire_time': self.last_fire_detection_time,
+            'return_to_base_mode': self.return_to_base_mode,
+            'return_to_base_start': self.return_to_base_start_time,
+            'search_mode': self.search_mode,
+            'suppressed_fires_count': len(self.suppressed_fire_positions),
+            'current_target': self.current_target_fire
+        }
+        
+        if self.last_new_fire_detection_time is not None:
+            info['time_since_last_new_fire'] = current_time - self.last_new_fire_detection_time
+            info['remaining_to_return'] = max(0, self.no_fire_timeout - info['time_since_last_new_fire'])
+        else:
+            info['time_since_last_new_fire'] = None
+            info['remaining_to_return'] = None
+            
+        return info
+
+    def reset_search_mode(self):
+        """Reset search mode and spinning detection"""
+        self.search_mode = False
+        self.search_start_time = None
+        self.last_action_time = None
+        self.get_logger().info("🔄 Search mode and spinning detection reset")
+
+    def reset_mission(self):
+        """Reset mission complete flag to allow robot to start moving again"""
+        self.mission_complete = False
+        self.get_logger().info("🔄 Mission reset - robot can now move again")
+
+    def force_return_to_base(self):
+        """Force the robot to return to base immediately (for testing)"""
+        if self.starting_position is None:
+            self.get_logger().error("Cannot force return to base: no starting position set")
+            return False
+        
+        self.return_to_base_mode = True
+        self.return_to_base_start_time = self.get_clock().now().nanoseconds / 1e9
+        self.get_logger().error("🚨 FORCED RETURN TO BASE ACTIVATED!")
+        return True
+
+    def handle_fire_info_request(self, request, response):
+        """Handle service request for fire detection information"""
+        info = self.get_fire_detection_info()
+        
+        response.success = True
+        response.message = f"""🔥 FIRE DETECTION STATUS:
+Current Time: {info['current_time']:.1f}s
+Last New Fire: {info['last_new_fire_time']:.1f}s ago ({info['time_since_last_new_fire']:.1f}s)
+Return-to-Base: {info['return_to_base_mode']} (remaining: {info['remaining_to_return']:.1f}s)
+Search Mode: {info['search_mode']}
+Suppressed Fires: {info['suppressed_fires_count']}
+Current Target: {info['current_target']}
+Mission Complete: {self.mission_complete}"""
+        
+        return response
+
+    def handle_reset_mission_request(self, request, response):
+        """Handle service request to reset mission complete flag"""
+        self.reset_mission()
+        response.success = True
+        response.message = "Mission reset successfully - robot can now move again"
+        return response
 
     def update_fire_detection_time(self):
         """Update the last fire detection timestamp"""
         current_time = self.get_clock().now().nanoseconds / 1e9
         self.last_fire_detection_time = current_time
 
-    def update_visited_areas(self):
-        """Update the visited areas grid with current position"""
-        if self.robot_pose is None:
-            return
-
+    def update_new_fire_detection_time(self):
+        """Update the last NEW fire detection timestamp (only for non-suppressed fires)"""
         current_time = self.get_clock().now().nanoseconds / 1e9
-        x, y = self.robot_pose.position.x, self.robot_pose.position.y
-
-        # Convert world coordinates to grid coordinates
-        grid_x = int(x / self.visited_grid_resolution)
-        grid_y = int(y / self.visited_grid_resolution)
-        grid_key = (grid_x, grid_y)
-
-        # Update visited grid with timestamp
-        self.visited_grid[grid_key] = current_time
-
-        # Add to position history
-        self.position_history.append((x, y, current_time))
-        self.last_position_update = current_time
-
-        # Clean up old visited areas (older than visit_decay_time)
-        current_time = self.get_clock().now().nanoseconds / 1e9
-        old_keys = [key for key, timestamp in self.visited_grid.items()
-                   if current_time - timestamp > self.visit_decay_time]
-        for key in old_keys:
-            del self.visited_grid[key]
-
-    def is_area_visited(self, x, y):
-        """Check if a given position has been visited recently"""
-        grid_x = int(x / self.visited_grid_resolution)
-        grid_y = int(y / self.visited_grid_resolution)
-        grid_key = (grid_x, grid_y)
-
-        if grid_key not in self.visited_grid:
-            return False
-
-        current_time = self.get_clock().now().nanoseconds / 1e9
-        time_since_visit = current_time - self.visited_grid[grid_key]
-
-        return time_since_visit < self.visit_decay_time
-
-    def get_visited_penalty(self, x, y):
-        """Get penalty for visiting a location (higher penalty for recently visited areas)"""
-        if not self.is_area_visited(x, y):
-            return 0.0
-
-        grid_x = int(x / self.visited_grid_resolution)
-        grid_y = int(y / self.visited_grid_resolution)
-        grid_key = (grid_x, grid_y)
-
-        current_time = self.get_clock().now().nanoseconds / 1e9
-        time_since_visit = current_time - self.visited_grid[grid_key]
-
-        # Penalty decreases over time (more recent visits = higher penalty)
-        penalty_factor = max(0.1, 1.0 - (time_since_visit / self.visit_decay_time))
-        return self.visited_penalty * penalty_factor
-
-    def get_unvisited_direction_penalty(self, action):
-        """Get penalty for actions that lead toward visited areas"""
-        if self.robot_pose is None:
-            return 0.0
-
-        # Predict where the robot would be after taking this action
-        current_x = self.robot_pose.position.x
-        current_y = self.robot_pose.position.y
-        current_yaw = self.quaternion_to_yaw(self.robot_pose.orientation)
-
-        # Simulate action effect (rough prediction)
-        predicted_x, predicted_y = self.predict_position_after_action(current_x, current_y, current_yaw, action)
-
-        # Check if predicted position is in visited area
-        return self.get_visited_penalty(predicted_x, predicted_y)
-
-    def predict_position_after_action(self, x, y, yaw, action, time_step=1.0):
-        """Predict robot position after taking an action"""
-        if action == 0:  # move_forward
-            x += self.forward_speed * time_step * math.cos(yaw)
-            y += self.forward_speed * time_step * math.sin(yaw)
-        elif action == 1:  # turn_left
-            # Position doesn't change much with just turning
-            pass
-        elif action == 2:  # turn_right
-            # Position doesn't change much with just turning
-            pass
-        elif action == 4:  # move_backward
-            x -= self.backward_speed * time_step * math.cos(yaw)
-            y -= self.backward_speed * time_step * math.sin(yaw)
-        elif action == 5:  # slow_forward
-            x += self.slow_forward_speed * time_step * math.cos(yaw)
-            y += self.slow_forward_speed * time_step * math.sin(yaw)
-
-        return x, y
+        self.last_new_fire_detection_time = current_time
+        self.get_logger().info(f"🔥 NEW fire detected at {current_time:.1f}s - resetting return-to-base timer")
 
     def return_to_base(self):
-        """Navigate back to the starting position"""
+        """Navigate back to the starting position using deterministic control (no RL)"""
         if self.starting_position is None or self.robot_pose is None:
             self.get_logger().warning("Cannot return to base: missing starting position or current pose")
             return self.get_stop_cmd()
@@ -674,28 +723,39 @@ class DQNAgentNode(Node):
 
         cmd = Twist()
 
-        # If we're close to the starting position, stop
+        # If we're close to the starting position, stop completely
         if distance < 0.2:
-            self.get_logger().info("🏠 Reached starting position!")
+            self.get_logger().error("🏠 REACHED BASE! Robot stopped at starting position!")
             self.return_to_base_mode = False
+            self.return_to_base_start_time = None
+            self.mission_complete = True  # Mission is now complete
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
+            self.get_logger().info("🤖 Robot stopped - mission complete!")
             return cmd
 
         # First, rotate towards the target
         if abs(angle_diff) > self.angle_threshold:
             cmd.linear.x = 0.0
             cmd.angular.z = self.turn_speed if angle_diff > 0 else -self.turn_speed
-            self.get_logger().debug(f"🏠 Rotating towards base: angle_diff={angle_diff:.2f}, distance={distance:.2f}")
+            self.get_logger().info(f"🏠 Rotating to base: angle_diff={angle_diff:.2f}, distance={distance:.2f}m")
         else:
             # Then move towards the target
             cmd.linear.x = min(self.forward_speed, distance)  # Slow down as we approach
             cmd.angular.z = angle_diff * 0.5  # Small corrections
-            self.get_logger().debug(f"🏠 Moving towards base: distance={distance:.2f}, linear.x={cmd.linear.x:.2f}")
+            self.get_logger().info(f"🏠 Moving to base: distance={distance:.2f}m, speed={cmd.linear.x:.2f}")
 
         return cmd
 
     def control_loop(self):
+        # Check if mission is complete - robot should stay stopped
+        if self.mission_complete:
+            cmd = Twist()
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.cmd_pub.publish(cmd)
+            return
+
         if not self.is_ready:
             self.get_logger().warning("Node not ready, skipping control loop")
             cmd = Twist()
@@ -722,22 +782,60 @@ class DQNAgentNode(Node):
         if self.return_to_base_mode:
             cmd = self.return_to_base()
             self.cmd_pub.publish(cmd)
+            # Log return-to-base status every second
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if hasattr(self, '_last_return_log') and current_time - self._last_return_log > 1.0:
+                distance_to_base = math.sqrt((self.starting_position[0] - self.robot_pose.position.x)**2 + 
+                                           (self.starting_position[1] - self.robot_pose.position.y)**2)
+                self.get_logger().warn(f"🏠 RETURNING TO BASE: {distance_to_base:.2f}m remaining")
+                self._last_return_log = current_time
+            elif not hasattr(self, '_last_return_log'):
+                self._last_return_log = current_time
             return
 
         fire_detected = self.current_obs[0] > 0.5
         self.fire_detected_buffer.append(fire_detected)
         stable_fire_detected = sum(self.fire_detected_buffer) >= 3
 
-        # Update fire detection time if fire is detected
-        if stable_fire_detected:
-            self.update_fire_detection_time()
-            # If we were returning to base but detected a new fire, cancel return-to-base
-            if self.return_to_base_mode:
-                self.return_to_base_mode = False
-                self.get_logger().info("🔥 New fire detected, canceling return to base")
+        # Show countdown timer for return-to-base
+        if self.last_new_fire_detection_time is not None and not self.return_to_base_mode:
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            time_since_last_new_fire = current_time - self.last_new_fire_detection_time
+            remaining_time = max(0, self.no_fire_timeout - time_since_last_new_fire)
+            
+            # Show countdown every 5 seconds when more than 10 seconds remaining
+            if remaining_time > 10 and int(remaining_time) % 5 == 0:
+                if not hasattr(self, '_last_countdown') or self._last_countdown != int(remaining_time):
+                    self.get_logger().info(f"⏰ Return to base in {int(remaining_time)} seconds")
+                    self._last_countdown = int(remaining_time)
+            # Show urgent countdown when less than 10 seconds
+            elif 0 < remaining_time <= 10:
+                if not hasattr(self, '_last_urgent') or self._last_urgent != int(remaining_time):
+                    self.get_logger().warn(f"🚨 RETURN TO BASE IN {int(remaining_time)} SECONDS!")
+                    self._last_urgent = int(remaining_time)
 
         fire_distance = self.current_obs[4] if len(self.current_obs) >= 5 else 999.0
         current_fire_position = tuple(self.current_obs[1:3]) if len(self.current_obs) >= 3 else None
+
+        # Update fire detection time if fire is detected
+        if stable_fire_detected:
+            # Check if this is a NEW fire (not suppressed)
+            is_new_fire = True
+            if current_fire_position:
+                for suppressed_pos in self.suppressed_fire_positions:
+                    if suppressed_pos and math.dist(suppressed_pos, current_fire_position) < 0.2:
+                        is_new_fire = False
+                        break
+            
+            if is_new_fire:
+                self.update_new_fire_detection_time()
+                # If we were returning to base but detected a new fire, cancel return-to-base
+                if self.return_to_base_mode:
+                    self.return_to_base_mode = False
+                    self.return_to_base_start_time = None
+                    self.get_logger().info("🔥 NEW fire detected, canceling return to base")
+            else:
+                self.get_logger().debug(f"🔥 Detected suppressed fire at {current_fire_position}, not resetting return-to-base timer")
 
         current_time = self.get_clock().now().nanoseconds / 1e9
         if (stable_fire_detected and not self.suppression_mode and not self.approach_mode and
@@ -829,6 +927,11 @@ class DQNAgentNode(Node):
                 self.vla_pub.publish(Bool(data=False))
 
         action, action_name, cmd = self.select_rl_action()
+        
+        # Add search mode indicator to action name
+        if self.search_mode:
+            action_name = f"SEARCH_{action_name}"
+        
         if self.post_avoid_recenter and (self.lidar_ranges is None or float(np.min(self.lidar_ranges)) >= self.min_safe_distance):
             angle_to_fire = self.current_obs[3] if (self.current_obs is not None and len(self.current_obs) >= 4) else 0.0
             if abs(angle_to_fire) > self.angle_threshold:
