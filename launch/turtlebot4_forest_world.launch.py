@@ -218,25 +218,26 @@ def generate_launch_description():
     )
 
     camera_bridge_node = TimerAction(
-        period=16.0,
-        actions=[
-            ExecuteProcess(
-                cmd=['echo', '📷 DEBUG: Starting camera bridge at 16 seconds...'],
-                output='screen'
-            ),
-            Node(
-                package='ros_gz_bridge',
-                executable='parameter_bridge',
-                name='camera_bridge_manual',
-                arguments=[
-                    '/camera@sensor_msgs/msg/Image[gz.msgs.Image',
-                    '--ros-args', '-r', '/camera:=/test_camera'
-                ],
-                output='screen'
-            )
-        ],
-        condition=LaunchConfigurationEquals('run_simulation', 'true')
-    )
+    period=16.0,
+    actions=[
+        ExecuteProcess(
+            cmd=['echo', '📷 DEBUG: Starting camera bridge at 16 seconds...'],
+            output='screen'
+        ),
+        Node(
+            package='ros_gz_bridge',
+            executable='parameter_bridge',
+            name='camera_bridge_manual',
+            arguments=[
+                '/world/forest_world/model/turtlebot4/link/camera_link/sensor/camera/image@sensor_msgs/msg/Image[gz.msgs.Image',
+                '--ros-args', '-r', '/world/forest_world/model/turtlebot4/link/camera_link/sensor/camera/image:=/test_camera'
+            ],
+            output='screen'
+        )
+    ],
+    condition=LaunchConfigurationEquals('run_simulation', 'true')
+)
+    
 
     # Pyroguard nodes
     pyroguard_nodes = TimerAction(
@@ -356,10 +357,11 @@ def generate_launch_description():
         turtlebot4_spawn_launch,
         lidar_bridge_node,
         camera_bridge_node,
+        
 
         # Pyroguard nodes
         pyroguard_nodes,
 
         # Optional test node (uncomment to include)
-        # test_node,
+        #test_node,
     ])

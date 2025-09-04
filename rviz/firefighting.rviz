@@ -1,0 +1,48 @@
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Map
+      Name: Map
+      Topic: /map
+      Update Interval: 0.1
+      Value: True
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Suppressed Fire Markers
+      Topic: /suppressed_fire_markers
+      Value: True
+    - Class: rviz_default_plugins/LaserScan
+      Name: LaserScan
+      Topic: /world/forest_world/model/turtlebot4/link/lidar_link/sensor/lidar/scan
+      Size (m): 0.05
+      Color: 255; 0; 0
+      Queue Size: 100  # Added
+      Value: True
+    - Class: rviz_default_plugins/Image
+      Name: Camera
+      Topic: /test_camera
+      Queue Size: 10  # Added
+      Value: True
+    - Class: rviz_default_plugins/Image
+      Name: HSV Image
+      Topic: /hsv_image
+      Queue Size: 10  # Added for debugging
+      Value: True
+    - Class: rviz_default_plugins/Pose
+      Name: Robot Pose
+      Topic: /odom
+      Queue Size: 10  # Added
+      Value: True
+  Global Options:
+    Fixed Frame: map
+  Tools:
+    - Class: rviz_default_plugins/Interact
+  Views:
+    Current View:
+      Class: rviz_default_plugins/XYOrbit
+      Distance: 10.0
+      Pitch: 0.5
+      Yaw: 0.0
+      Focal Point:
+        X: 0.0
+        Y: 0.0
+        Z: 0.0

@@ -26,6 +26,7 @@
   <depend>turtlebot4_ignition_bringup</depend>
   <depend>xacro</depend>
   <depend>rviz2</depend>
+  <depend>visualization_msgs</depend>
   
   <export>
     <build_type>ament_python</build_type>
