@@ -299,6 +299,7 @@ def generate_launch_description():
                     {'mode': 'train_online'},
                     {'obs_size': 5},
                     {'action_size': 6},
+                    {'model_path': 'dqn_model.pth'},
                 ]
             ),
             Node(

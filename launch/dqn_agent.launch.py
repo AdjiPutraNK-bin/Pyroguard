@@ -100,7 +100,7 @@ def generate_launch_description():
             parameters=[
                 {'obs_size': 4},
                 {'action_size': 5},
-                {'model_path': 'dqn_model_offline.pth'},
+                {'model_path': 'dqn_model.pth'},
                 {'epsilon_start': 0.9},
                 {'epsilon_end': 0.05},
                 {'epsilon_decay': 1000},
