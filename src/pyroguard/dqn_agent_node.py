@@ -207,6 +207,11 @@ class DQNAgentNode(Node):
         
         # Mission complete flag
         self.mission_complete = False
+        
+        # Return-to-base navigation variables
+        self.last_return_position = None
+        self.stuck_counter = 0
+        self.rotation_start_time = None
 
     def check_readiness(self):
         if self.current_obs is not None:
@@ -569,6 +574,7 @@ class DQNAgentNode(Node):
             if not self.return_to_base_mode:
                 self.return_to_base_mode = True
                 self.return_to_base_start_time = current_time
+                self.reset_return_navigation()  # Reset navigation variables
                 self.get_logger().error(f"🚨 NO NEW FIRES FOR {self.no_fire_timeout} SECONDS - INITIATING RETURN TO BASE!")
                 # Cancel the timer to avoid repeated calls
                 if hasattr(self, 'return_to_base_timer'):
@@ -589,6 +595,13 @@ class DQNAgentNode(Node):
         if self.return_to_base_mode and self.return_to_base_start_time is not None:
             time_in_return_mode = current_time - self.return_to_base_start_time
             self.get_logger().info(f"🏠 RETURN TO BASE ACTIVE: {time_in_return_mode:.1f} seconds navigating")
+            
+            # Log current position and target
+            if self.robot_pose is not None and self.starting_position is not None:
+                current_pos = (self.robot_pose.position.x, self.robot_pose.position.y)
+                target_pos = self.starting_position
+                distance = math.sqrt((target_pos[0] - current_pos[0])**2 + (target_pos[1] - current_pos[1])**2)
+                self.get_logger().info(f"📍 Position: {current_pos}, Target: {target_pos}, Distance: {distance:.2f}m")
         
         if self.last_new_fire_detection_time is not None:
             time_since_last_new_fire = current_time - self.last_new_fire_detection_time
@@ -648,6 +661,13 @@ class DQNAgentNode(Node):
         self.last_action_time = None
         self.get_logger().info("🔄 Search mode and spinning detection reset")
 
+    def reset_return_navigation(self):
+        """Reset return-to-base navigation variables"""
+        self.last_return_position = None
+        self.stuck_counter = 0
+        self.rotation_start_time = None
+        self.get_logger().info("🔄 Return-to-base navigation variables reset")
+
     def reset_mission(self):
         """Reset mission complete flag to allow robot to start moving again"""
         self.mission_complete = False
@@ -663,6 +683,33 @@ class DQNAgentNode(Node):
         self.return_to_base_start_time = self.get_clock().now().nanoseconds / 1e9
         self.get_logger().error("🚨 FORCED RETURN TO BASE ACTIVATED!")
         return True
+
+    def get_fire_detection_info(self):
+        """Get comprehensive fire detection status information"""
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        
+        # Calculate time since last new fire detection
+        last_new_fire_time = self.last_new_fire_detection_time if self.last_new_fire_detection_time else 0.0
+        time_since_last_new_fire = current_time - last_new_fire_time if self.last_new_fire_detection_time else 0.0
+        
+        # Calculate remaining time to return to base
+        remaining_to_return = 0.0
+        if self.last_new_fire_detection_time and not self.return_to_base_mode:
+            remaining_to_return = max(0, self.no_fire_timeout - time_since_last_new_fire)
+        
+        # Get current target information
+        current_target = str(self.current_target_fire) if self.current_target_fire else "None"
+        
+        return {
+            'current_time': current_time,
+            'last_new_fire_time': last_new_fire_time,
+            'time_since_last_new_fire': time_since_last_new_fire,
+            'return_to_base_mode': self.return_to_base_mode,
+            'remaining_to_return': remaining_to_return,
+            'search_mode': self.search_mode,
+            'suppressed_fires_count': len(self.suppressed_fire_positions),
+            'current_target': current_target
+        }
 
     def handle_fire_info_request(self, request, response):
         """Handle service request for fire detection information"""
@@ -713,37 +760,83 @@ Mission Complete: {self.mission_complete}"""
         dx = start_x - current_x
         dy = start_y - current_y
         distance = math.sqrt(dx**2 + dy**2)
-        angle_to_target = math.atan2(dy, dx)
-
-        # Get current robot orientation
-        current_yaw = self.quaternion_to_yaw(self.robot_pose.orientation)
-
-        # Calculate angle difference
-        angle_diff = self.normalize_angle(angle_to_target - current_yaw)
-
-        cmd = Twist()
-
-        # If we're close to the starting position, stop completely
-        if distance < 0.2:
+        current_position = (current_x, current_y)
+        
+        # Handle case where we're already at the base
+        if distance < 0.1:
             self.get_logger().error("🏠 REACHED BASE! Robot stopped at starting position!")
             self.return_to_base_mode = False
             self.return_to_base_start_time = None
             self.mission_complete = True  # Mission is now complete
+            cmd = Twist()
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
             self.get_logger().info("🤖 Robot stopped - mission complete!")
             return cmd
 
-        # First, rotate towards the target
-        if abs(angle_diff) > self.angle_threshold:
+        # Check if robot is stuck (not moving)
+        if self.last_return_position is not None:
+            dist_moved = math.sqrt((current_x - self.last_return_position[0])**2 + 
+                                 (current_y - self.last_return_position[1])**2)
+            if dist_moved < 0.05:  # Less than 5cm movement
+                self.stuck_counter += 1
+                if self.stuck_counter > 20:  # Stuck for 2 seconds (10Hz * 2)
+                    self.get_logger().error("🏠 STUCK! Robot not moving towards base, forcing mission complete")
+                    self.return_to_base_mode = False
+                    self.mission_complete = True
+                    cmd = Twist()
+                    cmd.linear.x = 0.0
+                    cmd.angular.z = 0.0
+                    return cmd
+            else:
+                self.stuck_counter = 0
+        
+        self.last_return_position = current_position
+
+        # Calculate target angle
+        angle_to_target = math.atan2(dy, dx)
+        
+        # Get current robot orientation
+        current_yaw = self.quaternion_to_yaw(self.robot_pose.orientation)
+        
+        # Calculate angle difference and normalize it properly
+        angle_diff = angle_to_target - current_yaw
+        angle_diff = (angle_diff + math.pi) % (2 * math.pi) - math.pi  # Normalize to [-pi, pi]
+
+        cmd = Twist()
+
+        # If we're very close, just move directly to base (ignore angle)
+        if distance < 0.5:
+            cmd.linear.x = min(self.slow_forward_speed * 2, distance * 2)  # Move slowly when close
+            cmd.angular.z = angle_diff * 0.3  # Small angular correction
+            self.get_logger().info(f"🏠 FINAL APPROACH: distance={distance:.2f}m, angle_diff={math.degrees(angle_diff):.1f}°")
+            return cmd
+
+        # First, rotate towards the target if angle difference is significant
+        if abs(angle_diff) > math.radians(15):  # 15 degrees threshold
             cmd.linear.x = 0.0
-            cmd.angular.z = self.turn_speed if angle_diff > 0 else -self.turn_speed
-            self.get_logger().info(f"🏠 Rotating to base: angle_diff={angle_diff:.2f}, distance={distance:.2f}m")
+            # Choose rotation direction and speed based on angle magnitude
+            rotation_speed = min(self.turn_speed, abs(angle_diff) * 2.0)  # Faster for larger angles
+            cmd.angular.z = rotation_speed if angle_diff > 0 else -rotation_speed
+            
+            # Track rotation time to prevent infinite spinning
+            if self.rotation_start_time is None:
+                self.rotation_start_time = self.get_clock().now().nanoseconds / 1e9
+            elif (self.get_clock().now().nanoseconds / 1e9 - self.rotation_start_time) > 30:  # 30 second timeout
+                self.get_logger().error("🏠 ROTATION TIMEOUT! Moving forward anyway")
+                cmd.linear.x = self.slow_forward_speed
+                cmd.angular.z = 0.0
+                self.rotation_start_time = None
+            
+            self.get_logger().info(f"🏠 ROTATING: angle_diff={math.degrees(angle_diff):.1f}°, distance={distance:.2f}m")
         else:
-            # Then move towards the target
-            cmd.linear.x = min(self.forward_speed, distance)  # Slow down as we approach
-            cmd.angular.z = angle_diff * 0.5  # Small corrections
-            self.get_logger().info(f"🏠 Moving to base: distance={distance:.2f}m, speed={cmd.linear.x:.2f}")
+            # Clear rotation timeout when we start moving
+            self.rotation_start_time = None
+            
+            # Move towards the target with small angular corrections
+            cmd.linear.x = min(self.forward_speed * 0.8, distance)  # Slightly slower than normal
+            cmd.angular.z = angle_diff * 0.5  # Proportional control for small corrections
+            self.get_logger().info(f"🏠 MOVING: distance={distance:.2f}m, speed={cmd.linear.x:.2f}, correction={cmd.angular.z:.2f}")
 
         return cmd
 
@@ -780,6 +873,15 @@ Mission Complete: {self.mission_complete}"""
 
         # Check if we should return to base
         if self.return_to_base_mode:
+            if self.starting_position is None:
+                self.get_logger().error("🏠 Cannot return to base: no starting position recorded!")
+                self.return_to_base_mode = False
+                self.mission_complete = True  # End mission if we can't return
+                cmd = Twist()
+                cmd.linear.x = 0.0
+                cmd.angular.z = 0.0
+                return cmd
+            
             cmd = self.return_to_base()
             self.cmd_pub.publish(cmd)
             # Log return-to-base status every second
