@@ -32,7 +32,7 @@ class DQNAgentNode(Node):
         self.reset_mission_service = self.create_service(Trigger, 'reset_mission', self.handle_reset_mission_request)
 
         self.fire_detected_buffer = deque([False]*5, maxlen=5)
-        self.avoid_kp = 0.8
+        self.avoid_kp = 0.6
         self.avoid_kd = 0.2
         self.avoid_last_error = 0.0
 
@@ -74,8 +74,8 @@ class DQNAgentNode(Node):
                 ('avoidance_window_deg', 120.0),
                 ('path_cost_distance_weight', 0.7),
                 ('path_cost_obstacle_weight', 0.3),
-                ('return_to_base_timeout', 30.0),
-                ('avoidance_timeout', 10.0),
+                ('return_to_base_timeout', 15.0),
+                ('avoidance_timeout', 2.0),
             ]
         )
 
@@ -170,6 +170,10 @@ class DQNAgentNode(Node):
         self.target_lock_start_time = None
         self.current_fire_world = None
 
+        # Fire suppression tracking
+        self.suppressed_fire_positions = []
+        self.fire_detected_buffer = deque(maxlen=5)
+
         self.action_map = {
             0: "move_forward",
             1: "turn_left",
@@ -229,8 +233,11 @@ class DQNAgentNode(Node):
             self.get_logger().info("All required topics received, node ready")
             self.readiness_timer.cancel()
         else:
-            self.get_logger().warning("Waiting for required topics: obs=%s, lidar=%s, odom=%s" % 
-                                     (self.obs_received, self.lidar_received, self.odom_received))
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_topics_wait_warn', 0) >= 10.0:
+                self.get_logger().warning("Waiting for required topics: obs=%s, lidar=%s, odom=%s" % 
+                                         (self.obs_received, self.lidar_received, self.odom_received))
+                self._last_topics_wait_warn = current_time
 
     def obs_callback(self, msg):
         if len(msg.data) == self.obs_size:
@@ -323,7 +330,10 @@ class DQNAgentNode(Node):
         if self.lidar_ranges is None or len(self.lidar_ranges) == 0 or self.robot_pose is None:
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
-            self.get_logger().warning("No LIDAR or odometry data, stopping robot")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_lidar_odom_warn', 0) >= 10.0:
+                self.get_logger().warning("No LIDAR or odometry data, stopping robot")
+                self._last_lidar_odom_warn = current_time
             return cmd
 
         ranges = np.array(self.lidar_ranges)
@@ -346,7 +356,10 @@ class DQNAgentNode(Node):
         if len(front_indices) < self.min_obstacle_beams:
             cmd.linear.x = self.forward_speed
             cmd.angular.z = 0.0
-            self.get_logger().debug("No obstacles in window, moving forward")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_no_obstacles_log', 0) >= 10.0:
+                self.get_logger().debug("No obstacles in window, moving forward")
+                self._last_no_obstacles_log = current_time
             return cmd
 
         yaw = self.quaternion_to_yaw(self.robot_pose.orientation) if self.robot_pose else 0.0
@@ -372,7 +385,10 @@ class DQNAgentNode(Node):
         if all(c == float('inf') for c in costs):
             cmd.linear.x = self.backward_speed
             cmd.angular.z = 0.0
-            self.get_logger().warning("No valid paths found, moving backward")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_no_paths_warn', 0) >= 10.0:
+                self.get_logger().warning("No valid paths found, moving backward")
+                self._last_no_paths_warn = current_time
             return cmd
 
         best_window_idx = np.argmin(costs)
@@ -381,7 +397,10 @@ class DQNAgentNode(Node):
 
         threshold = self.emergency_threshold * (self.approach_escape_scale if self.approach_mode else 1.0)
         if min_dist < threshold:
-            self.get_logger().warn(f"[EMERGENCY] Close to obstacle ({min_dist:.2f}m) - initiating escape")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_emergency_warn', 0) >= 10.0:
+                self.get_logger().warn(f"[EMERGENCY] Close to obstacle ({min_dist:.2f}m) - initiating escape")
+                self._last_emergency_warn = current_time
             self.escape_state = 'backup'
             self.escape_end_time = self.get_clock().now().nanoseconds / 1e9 + (self.emergency_escape_duration * (self.approach_escape_scale if self.approach_mode else 1.0))
             self.escape_rotation_side = -self.turn_speed if best_angle < 0 else self.turn_speed
@@ -393,7 +412,13 @@ class DQNAgentNode(Node):
         cmd.angular.z = max(-self.avoidance_max_angular, min(self.avoidance_max_angular, best_angle * self.avoid_kp))
         if min_dist < self.min_safe_distance * 1.5:
             cmd.linear.x = self.slow_forward_speed
-        self.get_logger().info(f"[AVOID] Selected path at angle {best_angle:.2f}rad ({np.degrees(best_angle):.1f}°), min_dist={min_dist:.2f}m, linear.x={cmd.linear.x:.2f}, angular.z={cmd.angular.z:.2f}")
+        
+        # Log avoidance path selection every 3 seconds to reduce spam
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        if not hasattr(self, '_last_avoidance_log') or current_time - self._last_avoidance_log >= 3.0:
+            self.get_logger().info(f"[AVOID] Selected path at angle {best_angle:.2f}rad ({np.degrees(best_angle):.1f}°), min_dist={min_dist:.2f}m, linear.x={cmd.linear.x:.2f}, angular.z={cmd.angular.z:.2f}")
+            self._last_avoidance_log = current_time
+        
         return cmd
 
     def execute_escape(self):
@@ -428,10 +453,15 @@ class DQNAgentNode(Node):
 
     def select_rl_action(self):
         cmd = Twist()
+        now = self.get_clock().now().nanoseconds / 1e9
+        
         if self.current_obs is None:
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
-            self.get_logger().warning("No observation, stopping robot")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_no_obs_warn', 0) >= 10.0:
+                self.get_logger().warning("No observation, stopping robot")
+                self._last_no_obs_warn = current_time
             return None, "stop", cmd
 
         min_obstacle_distance = self.current_obs[2]
@@ -446,16 +476,20 @@ class DQNAgentNode(Node):
         avoidance_threshold = self.min_safe_distance * 1.2 if self.avoidance_count > 0 else self.min_safe_distance
 
         if min_obstacle_distance < avoidance_threshold:
-            now = self.get_clock().now().nanoseconds / 1e9
-            
             # Check if we've been in avoidance too long
             if self.avoidance_start_time is None:
                 self.avoidance_start_time = now
                 self.avoidance_count += 1
-                self.get_logger().info(f"🔶 AVOIDANCE TRIGGERED: min_obstacle_distance={min_obstacle_distance:.2f}m < threshold={avoidance_threshold:.2f}m (hysteresis applied)")
+                # Log avoidance trigger every 3 seconds to reduce spam
+                if not hasattr(self, '_last_avoidance_trigger_log') or now - self._last_avoidance_trigger_log >= 3.0:
+                    self.get_logger().info(f"🔶 AVOIDANCE TRIGGERED: min_obstacle_distance={min_obstacle_distance:.2f}m < threshold={avoidance_threshold:.2f}m (hysteresis applied)")
+                    self._last_avoidance_trigger_log = now
             elif now - self.avoidance_start_time > self.avoidance_timeout:
                 # Timeout reached - temporarily increase threshold to escape
-                self.get_logger().warning(f"⏰ AVOIDANCE TIMEOUT: Been avoiding for {now - self.avoidance_start_time:.1f}s, temporarily increasing threshold")
+                # Log timeout every 3 seconds to reduce spam
+                if not hasattr(self, '_last_timeout_log') or now - self._last_timeout_log >= 3.0:
+                    self.get_logger().warning(f"⏰ AVOIDANCE TIMEOUT: Been avoiding for {now - self.avoidance_start_time:.1f}s, temporarily increasing threshold")
+                    self._last_timeout_log = now
                 self.avoidance_start_time = None
                 # Force a move by using a higher threshold temporarily
                 if min_obstacle_distance < self.min_safe_distance * 1.5:
@@ -468,14 +502,18 @@ class DQNAgentNode(Node):
                     self.get_logger().info(f"✅ AVOIDANCE CLEARED: min_obstacle_distance={min_obstacle_distance:.2f}m >= relaxed threshold")
                     self.avoidance_start_time = None
             else:
-                self.get_logger().debug(f"🔶 AVOIDANCE CONTINUING: {now - self.avoidance_start_time:.1f}s elapsed")
+                if now - getattr(self, '_last_avoidance_continuing_log', 0) >= 10.0:
+                    self.get_logger().debug(f"🔶 AVOIDANCE CONTINUING: {now - self.avoidance_start_time:.1f}s elapsed")
+                    self._last_avoidance_continuing_log = now
             
             cmd = self.get_avoidance_cmd()
             if self.approach_mode:
                 self.post_avoid_recenter = True
             return None, "avoidance", cmd
         
-        self.get_logger().debug(f"✅ No avoidance needed: min_obstacle_distance={min_obstacle_distance:.2f}m >= threshold={avoidance_threshold:.2f}m")
+        if now - getattr(self, '_last_no_avoidance_log', 0) >= 10.0:
+            self.get_logger().debug(f"✅ No avoidance needed: min_obstacle_distance={min_obstacle_distance:.2f}m >= threshold={avoidance_threshold:.2f}m")
+            self._last_no_avoidance_log = now
         
         # Reset avoidance timer when not avoiding
         if self.avoidance_start_time is not None:
@@ -485,18 +523,27 @@ class DQNAgentNode(Node):
             if self.avoidance_count > 0:
                 self.avoidance_count = max(0, self.avoidance_count - 1)
         
+        current_time = self.get_clock().now().nanoseconds / 1e9
         if self.suppression_mode:
-            action = 3
-            self.get_logger().debug("🤖 SUPPRESSION MODE: stopping")
+            action = self.navigation_action()
+            if current_time - getattr(self, '_last_mode_log', 0) >= 3.0:
+                self.get_logger().debug("🤖 SUPPRESSION MODE: navigating")
+                self._last_mode_log = current_time
         elif self.approach_mode:
             action = self.navigation_action()
-            self.get_logger().debug("🤖 APPROACH MODE: using navigation action")
+            if current_time - getattr(self, '_last_mode_log', 0) >= 10.0:
+                self.get_logger().debug("🤖 APPROACH MODE: using navigation action")
+                self._last_mode_log = current_time
         elif fire_detected:
             action = self.navigation_action()
-            self.get_logger().debug("🤖 FIRE DETECTED: using navigation action")
+            if current_time - getattr(self, '_last_mode_log', 0) >= 10.0:
+                self.get_logger().debug("🤖 FIRE DETECTED: using navigation action")
+                self._last_mode_log = current_time
         else:
             action = self.select_smart_action(epsilon)
-            self.get_logger().debug("🤖 NO FIRE: using DQN action")
+            if current_time - getattr(self, '_last_mode_log', 0) >= 10.0:
+                self.get_logger().debug("🤖 NO FIRE: using DQN action")
+                self._last_mode_log = current_time
 
         if action is not None:
             action_name = self.action_map[action]
@@ -508,18 +555,27 @@ class DQNAgentNode(Node):
     def navigation_action(self):
         angle_to_fire = self.current_obs[3]
         fire_distance = self.current_obs[4]
-        self.get_logger().debug(f"🧭 Navigation: angle_to_fire={angle_to_fire:.3f}rad ({math.degrees(angle_to_fire):.1f}°), threshold={self.angle_threshold:.3f}rad ({math.degrees(self.angle_threshold):.1f}°), fire_dist={fire_distance:.2f}m")
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        if current_time - getattr(self, '_last_navigation_log', 0) >= 10.0:
+            self.get_logger().debug(f"🧭 Navigation: angle_to_fire={angle_to_fire:.3f}rad ({math.degrees(angle_to_fire):.1f}°), threshold={self.angle_threshold:.3f}rad ({math.degrees(self.angle_threshold):.1f}°), fire_dist={fire_distance:.2f}m")
+            self._last_navigation_log = current_time
         
         if abs(angle_to_fire) > self.angle_threshold:
             if angle_to_fire > 0:
-                self.get_logger().debug("🧭 Turning RIGHT toward fire")
+                if current_time - getattr(self, '_last_navigation_log', 0) >= 3.0:
+                    self.get_logger().debug("🧭 Turning RIGHT toward fire")
+                    self._last_navigation_log = current_time
                 return 2  # turn_right
             else:
-                self.get_logger().debug("🧭 Turning LEFT toward fire")
+                if current_time - getattr(self, '_last_navigation_log', 0) >= 3.0:
+                    self.get_logger().debug("🧭 Turning LEFT toward fire")
+                    self._last_navigation_log = current_time
                 return 1  # turn_left
         else:
             action = 5 if fire_distance < self.min_safe_distance * 2.0 else 0  # slow_forward or move_forward
-            self.get_logger().debug(f"🧭 Moving FORWARD toward fire (action={action})")
+            if current_time - getattr(self, '_last_navigation_log', 0) >= 3.0:
+                self.get_logger().debug(f"🧭 Moving FORWARD toward fire (action={action})")
+                self._last_navigation_log = current_time
             return action
 
     def select_smart_action(self, epsilon):
@@ -580,17 +636,15 @@ class DQNAgentNode(Node):
         if action_name == "move_forward":
             obstacle_dist = self.current_obs[2] if self.current_obs is not None else self.min_safe_distance
             base_speed = min(0.8, max(0.15, obstacle_dist * 0.3))
-            jitter = float(np.random.uniform(-0.05, 0.05))
-            speed = max(0.0, min(0.8, base_speed + jitter))
-            ang_jitter = float(np.random.uniform(-0.15, 0.15))
+            speed = max(0.0, min(0.8, base_speed))
             cmd.linear.x = speed
-            cmd.angular.z = ang_jitter
+            cmd.angular.z = 0.0
         elif action_name == "turn_left":
             cmd.linear.x = 0.05
-            cmd.angular.z = self.turn_speed  # Fixed: negative for left turn
+            cmd.angular.z = -self.turn_speed  # Fixed: negative for left turn
         elif action_name == "turn_right":
             cmd.linear.x = 0.05
-            cmd.angular.z = -self.turn_speed   # Fixed: positive for right turn
+            cmd.angular.z = self.turn_speed   # Fixed: positive for right turn
         elif action_name == "stop":
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
@@ -635,7 +689,9 @@ class DQNAgentNode(Node):
             # Log remaining time for debugging
             remaining_time = self.no_fire_timeout - time_since_last_new_fire
             if remaining_time < 10:  # Only log when less than 10 seconds remaining
-                self.get_logger().debug(f"🏠 Return to base in {remaining_time:.1f} seconds")
+                if current_time - getattr(self, '_last_return_to_base_log', 0) >= 10.0:
+                    self.get_logger().debug(f"🏠 Return to base in {remaining_time:.1f} seconds")
+                    self._last_return_to_base_log = current_time
 
     def debug_return_to_base_status(self):
         """Debug method to log return-to-base timing information"""
@@ -661,7 +717,10 @@ class DQNAgentNode(Node):
             
             # Show prominent countdown when close to return-to-base
             if remaining_time <= 10 and remaining_time > 0:
-                self.get_logger().warn(f"⏰ RETURN TO BASE IN {remaining_time:.1f} SECONDS!")
+                current_time_check = self.get_clock().now().nanoseconds / 1e9
+                if current_time_check - getattr(self, '_last_return_countdown_warn', 0) >= 10.0:
+                    self.get_logger().warn(f"⏰ RETURN TO BASE IN {remaining_time:.1f} SECONDS!")
+                    self._last_return_countdown_warn = current_time_check
             elif remaining_time == 0:
                 self.get_logger().error("� RETURN TO BASE TIMER EXPIRED - INITIATING RETURN!")
             else:
@@ -799,9 +858,18 @@ Mission Complete: {self.mission_complete}"""
 
     def return_to_base(self):
         """Navigate back to the starting position using deterministic control (no RL)"""
+        cmd = Twist()  # Initialize cmd at the beginning
+        
+        self.get_logger().info("🏠 RETURN_TO_BASE METHOD CALLED")
+        
         if self.starting_position is None or self.robot_pose is None:
-            self.get_logger().warning("Cannot return to base: missing starting position or current pose")
-            return self.get_stop_cmd()
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_return_base_warn', 0) >= 10.0:
+                self.get_logger().warning("Cannot return to base: missing starting position or current pose")
+                self._last_return_base_warn = current_time
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            return cmd
 
         # Calculate the vector from current position to starting position
         current_x = self.robot_pose.position.x
@@ -820,7 +888,6 @@ Mission Complete: {self.mission_complete}"""
             self.return_to_base_mode = False
             self.return_to_base_start_time = None
             self.mission_complete = True  # Mission is now complete
-            cmd = Twist()
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
             self.get_logger().info("🤖 Robot stopped - mission complete!")
@@ -828,19 +895,62 @@ Mission Complete: {self.mission_complete}"""
 
         # Check if robot is stuck (not moving)
         if self.last_return_position is not None:
-            dist_moved = math.sqrt((current_x - self.last_return_position[0])**2 + 
+            dist_moved = math.sqrt((current_x - self.last_return_position[0])**2 +
                                  (current_y - self.last_return_position[1])**2)
             if dist_moved < 0.05:  # Less than 5cm movement
-                self.stuck_counter += 1
+                # Only count as stuck if we're not intentionally rotating
+                # Check the last command sent to see if we were trying to move
+                if hasattr(self, '_last_cmd_linear') and self._last_cmd_linear > 0.01:
+                    # We were trying to move forward but didn't move - this is stuck
+                    self.stuck_counter += 1
+                    self.get_logger().warn(f"🏠 STUCK DETECTED: Trying to move forward (linear.x={self._last_cmd_linear:.2f}) but only moved {dist_moved:.3f}m. Counter: {self.stuck_counter}")
+                elif hasattr(self, '_last_cmd_angular') and abs(self._last_cmd_angular) > 0.01:
+                    # We were rotating - this is normal, don't count as stuck
+                    old_counter = self.stuck_counter
+                    self.stuck_counter = max(0, self.stuck_counter - 1)  # Decrease counter
+                    self.get_logger().debug(f"🏠 ROTATING: Angular command {self._last_cmd_angular:.2f}, moved {dist_moved:.3f}m. Counter: {old_counter} -> {self.stuck_counter}")
+                else:
+                    # No movement command - might be stuck
+                    self.stuck_counter += 1
+                    self.get_logger().warn(f"🏠 STUCK DETECTED: No movement command but only moved {dist_moved:.3f}m. Counter: {self.stuck_counter}")
+                
                 if self.stuck_counter > 20:  # Stuck for 2 seconds (10Hz * 2)
-                    self.get_logger().error("🏠 STUCK! Robot not moving towards base, forcing mission complete")
-                    self.return_to_base_mode = False
-                    self.mission_complete = True
-                    cmd = Twist()
-                    cmd.linear.x = 0.0
-                    cmd.angular.z = 0.0
-                    return cmd
+                    # Check if there are obstacles preventing movement
+                    if self.lidar_ranges is not None and len(self.lidar_ranges) > 0:
+                        min_obstacle_distance = float(np.min(self.lidar_ranges))
+                        if min_obstacle_distance < self.min_safe_distance:
+                            current_time = self.get_clock().now().nanoseconds / 1e9
+                            if current_time - getattr(self, '_last_stuck_obstacle_warn', 0) >= 10.0:
+                                self.get_logger().warn("🏠 STUCK! Detected obstacle, trying avoidance...")
+                                self._last_stuck_obstacle_warn = current_time
+                            # Try obstacle avoidance instead of ending mission
+                            avoidance_cmd = self.get_avoidance_cmd()
+                            if avoidance_cmd.linear.x != 0.0 or avoidance_cmd.angular.z != 0.0:
+                                self.get_logger().info("🏠 Using obstacle avoidance to navigate around blockage")
+                                self.stuck_counter = max(0, self.stuck_counter - 10)  # Reset counter partially
+                                return avoidance_cmd
+
+                    # If no obstacles or avoidance failed, try a different approach
+                    if self.stuck_counter > 40:  # Been stuck for 4 seconds total
+                        self.get_logger().error("🏠 STUCK! No obstacles detected but cannot move, continuing to try...")
+                        self.stuck_counter = 20  # Reset counter to keep trying rotation
+                        # Try rotating to find a clear path
+                        cmd.linear.x = 0.0
+                        cmd.angular.z = self.turn_speed * 0.5  # Slow rotation
+                        return cmd
+                    else:
+                        current_time = self.get_clock().now().nanoseconds / 1e9
+                        if current_time - getattr(self, '_last_stuck_rotation_warn', 0) >= 10.0:
+                            self.get_logger().warn("🏠 STUCK! No clear obstacles, trying rotation...")
+                            self._last_stuck_rotation_warn = current_time
+                        # Try rotating to find a clear path
+                        cmd.linear.x = 0.0
+                        cmd.angular.z = self.turn_speed * 0.5  # Slow rotation
+                        return cmd
             else:
+                # We're moving - reset stuck counter
+                if self.stuck_counter > 0:
+                    self.get_logger().info(f"🏠 MOVEMENT DETECTED: Moved {dist_moved:.3f}m, resetting stuck counter from {self.stuck_counter} to 0")
                 self.stuck_counter = 0
         
         self.last_return_position = current_position
@@ -855,7 +965,10 @@ Mission Complete: {self.mission_complete}"""
         angle_diff = angle_to_target - current_yaw
         angle_diff = (angle_diff + math.pi) % (2 * math.pi) - math.pi  # Normalize to [-pi, pi]
 
-        cmd = Twist()
+        # Debug logging for angle calculations
+        self.get_logger().info(f"🏠 DEBUG: current_pos=({current_x:.2f}, {current_y:.2f}), target=(0, 0)")
+        self.get_logger().info(f"🏠 DEBUG: dx={dx:.2f}, dy={dy:.2f}, angle_to_target={math.degrees(angle_to_target):.1f}°")
+        self.get_logger().info(f"🏠 DEBUG: current_yaw={math.degrees(current_yaw):.1f}°, angle_diff={math.degrees(angle_diff):.1f}°")
 
         # If we're very close, just move directly to base (ignore angle)
         if distance < 0.5:
@@ -880,7 +993,7 @@ Mission Complete: {self.mission_complete}"""
                 cmd.angular.z = 0.0
                 self.rotation_start_time = None
             
-            self.get_logger().info(f"🏠 ROTATING: angle_diff={math.degrees(angle_diff):.1f}°, distance={distance:.2f}m")
+            self.get_logger().info(f"🏠 ROTATING: angle_diff={math.degrees(angle_diff):.1f}°, distance={distance:.2f}m, cmd.angular.z={cmd.angular.z:.2f}")
         else:
             # Clear rotation timeout when we start moving
             self.rotation_start_time = None
@@ -902,7 +1015,10 @@ Mission Complete: {self.mission_complete}"""
             return
 
         if not self.is_ready:
-            self.get_logger().warning("Node not ready, skipping control loop")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_not_ready_warn', 0) >= 10.0:
+                self.get_logger().warning("Node not ready, skipping control loop")
+                self._last_not_ready_warn = current_time
             cmd = Twist()
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
@@ -910,7 +1026,10 @@ Mission Complete: {self.mission_complete}"""
             return
 
         if self.current_obs is None:
-            self.get_logger().warning("No observation received, skipping control loop")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_no_obs_control_warn', 0) >= 10.0:
+                self.get_logger().warning("No observation received, skipping control loop")
+                self._last_no_obs_control_warn = current_time
             cmd = Twist()
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
@@ -935,6 +1054,9 @@ Mission Complete: {self.mission_complete}"""
                 return cmd
             
             cmd = self.return_to_base()
+            # Track the command for stuck detection
+            self._last_cmd_linear = cmd.linear.x
+            self._last_cmd_angular = cmd.angular.z
             self.cmd_pub.publish(cmd)
             # Log return-to-base status every second
             current_time = self.get_clock().now().nanoseconds / 1e9
@@ -947,14 +1069,18 @@ Mission Complete: {self.mission_complete}"""
                 self._last_return_log = current_time
             return
 
-        fire_detected = self.current_obs[0] > 0.5
+        fire_detected = self.current_obs[0] > 0.6
         self.fire_detected_buffer.append(fire_detected)
         stable_fire_detected = sum(self.fire_detected_buffer) >= 3
 
         # Debug fire detection status
-        buffer_str = str(list(self.fire_detected_buffer)[-5:]) if len(self.fire_detected_buffer) >= 5 else str(list(self.fire_detected_buffer))
-        self.get_logger().debug(f"🔥 Fire detection: detected={fire_detected}, stable={stable_fire_detected}, buffer={buffer_str}")
-        self.get_logger().debug(f"📊 Observation: fire_prob={self.current_obs[0]:.3f}, fire_size={self.current_obs[1]:.3f}, min_dist={self.current_obs[2]:.3f}, angle={self.current_obs[3]:.3f}, fire_dist={self.current_obs[4]:.3f}")
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        if current_time - getattr(self, '_last_fire_detection_log', 0) >= 10.0:
+            buffer_str = str(list(self.fire_detected_buffer)[-5:]) if len(self.fire_detected_buffer) >= 5 else str(list(self.fire_detected_buffer))
+            detection_status = "RESPONSIVE" if fire_detected else "QUIET"
+            self.get_logger().debug(f"🔥 Fire detection [{detection_status}]: detected={fire_detected}, stable={stable_fire_detected}, buffer={buffer_str}")
+            self.get_logger().debug(f"📊 Observation: fire_prob={self.current_obs[0]:.3f}, fire_size={self.current_obs[1]:.3f}, min_dist={self.current_obs[2]:.3f}, angle={self.current_obs[3]:.3f}, fire_dist={self.current_obs[4]:.3f}")
+            self._last_fire_detection_log = current_time
 
         # Show countdown timer for return-to-base
         if self.last_new_fire_detection_time is not None and not self.return_to_base_mode:
@@ -970,11 +1096,38 @@ Mission Complete: {self.mission_complete}"""
             # Show urgent countdown when less than 10 seconds
             elif 0 < remaining_time <= 10:
                 if not hasattr(self, '_last_urgent') or self._last_urgent != int(remaining_time):
-                    self.get_logger().warn(f"🚨 RETURN TO BASE IN {int(remaining_time)} SECONDS!")
+                    current_time = self.get_clock().now().nanoseconds / 1e9
+                    if current_time - getattr(self, '_last_urgent_warn', 0) >= 10.0:
+                        self.get_logger().warn(f"🚨 RETURN TO BASE IN {int(remaining_time)} SECONDS!")
+                        self._last_urgent_warn = current_time
                     self._last_urgent = int(remaining_time)
 
         fire_distance = self.current_obs[4] if len(self.current_obs) >= 5 else 999.0
-        current_fire_position = tuple(self.current_obs[1:3]) if len(self.current_obs) >= 3 else None
+
+        # Calculate current fire position in world coordinates using polar to cartesian conversion
+        current_fire_position = None
+        if len(self.current_obs) >= 5 and self.robot_pose is not None:
+            angle_to_fire = self.current_obs[3]  # Angle in radians
+            fire_dist = self.current_obs[4]      # Distance in meters
+
+            # Validate inputs to prevent RuntimeWarning
+            if not (math.isfinite(angle_to_fire) and math.isfinite(fire_dist) and fire_dist >= 0):
+                self.get_logger().debug(f"Invalid fire detection data: angle={angle_to_fire}, dist={fire_dist}")
+            else:
+                # Convert polar coordinates to Cartesian relative to robot
+                fire_x_relative = fire_dist * math.cos(angle_to_fire)
+                fire_y_relative = fire_dist * math.sin(angle_to_fire)
+
+                # Convert to world coordinates using robot's current position and orientation
+                robot_x = self.robot_pose.position.x
+                robot_y = self.robot_pose.position.y
+                robot_yaw = self.quaternion_to_yaw(self.robot_pose.orientation)
+
+                # Rotate relative coordinates by robot's orientation and add to robot position
+                fire_x_world = robot_x + fire_x_relative * math.cos(robot_yaw) - fire_y_relative * math.sin(robot_yaw)
+                fire_y_world = robot_y + fire_x_relative * math.sin(robot_yaw) + fire_y_relative * math.cos(robot_yaw)
+
+                current_fire_position = (fire_x_world, fire_y_world)
 
         # Update fire detection time if fire is detected
         if stable_fire_detected:
@@ -994,23 +1147,26 @@ Mission Complete: {self.mission_complete}"""
                     self.return_to_base_start_time = None
                     self.get_logger().info("🔥 NEW fire detected, canceling return to base")
             else:
-                self.get_logger().debug(f"🔥 Detected suppressed fire at {current_fire_position}, not resetting return-to-base timer")
+                current_time = self.get_clock().now().nanoseconds / 1e9
+                if current_time - getattr(self, '_last_suppressed_fire_log', 0) >= 3.0:
+                    self.get_logger().debug(f"🔥 Detected suppressed fire at {current_fire_position}, not resetting return-to-base timer")
+                    self._last_suppressed_fire_log = current_time
 
         current_time = self.get_clock().now().nanoseconds / 1e9
-        if (stable_fire_detected and not self.suppression_mode and not self.approach_mode and
+        if (fire_detected and not self.suppression_mode and not self.approach_mode and
             current_fire_position and current_fire_position not in self.suppressed_fire_positions):
             if self.current_target_fire is None:
                 self.current_target_fire = current_fire_position
                 self.target_lock_start_time = current_time
-                self.get_logger().info(f"🔒 Locked onto new target fire at {self.current_target_fire}")
+                stability_status = "stable" if stable_fire_detected else "unstable"
+                self.get_logger().info(f"🔒 Locked onto new target fire at {self.current_target_fire} ({stability_status})")
             else:
-                self.get_logger().debug(
-                    f"Detected fire at {current_fire_position} but focused on {self.current_target_fire}; ignoring"
-                )
-
-        if (self.current_target_fire is not None and current_fire_position is not None and
-            math.dist(self.current_target_fire, current_fire_position) > 0.5):
-            stable_fire_detected = False
+                current_time = self.get_clock().now().nanoseconds / 1e9
+                if current_time - getattr(self, '_last_focused_fire_log', 0) >= 10.0:
+                    self.get_logger().debug(
+                        f"Detected fire at {current_fire_position} but focused on {self.current_target_fire}; ignoring"
+                    )
+                    self._last_focused_fire_log = current_time
 
         def is_suppressed(pos):
             for s in self.suppressed_fire_positions:
@@ -1021,19 +1177,8 @@ Mission Complete: {self.mission_complete}"""
             stable_fire_detected = False
 
         if self.approach_mode and fire_distance < self.suppression_distance:
-            if self.last_recenter_distance is None:
-                self.last_recenter_distance = fire_distance
-                self.recenter_checkpoints = [fire_distance * (2/3), fire_distance * (1/3)]
-            if self.recenter_checkpoints and fire_distance <= self.recenter_checkpoints[0]:
-                self.get_logger().info(f"🔄 Recentering to fire at distance {fire_distance:.2f}")
-                angle_to_fire = self.current_obs[3]
-                if abs(angle_to_fire) > self.angle_threshold:
-                    twist = Twist()
-                    twist.linear.x = 0.0
-                    twist.angular.z = -(self.turn_speed * 0.5) if angle_to_fire > 0 else (self.turn_speed * 0.5)
-                    self.cmd_pub.publish(twist)
-                    return
-                self.recenter_checkpoints.pop(0)
+            # No recentering in approach mode anymore
+            pass
         else:
             self.last_recenter_distance = None
             self.recenter_checkpoints = []
@@ -1045,32 +1190,39 @@ Mission Complete: {self.mission_complete}"""
             self.suppression_mode_pub.publish(Bool(data=False))
             self.vla_pub.publish(Bool(data=False))
             self.approach_lost_since = None
-        elif not stable_fire_detected and not self.suppression_mode and not self.approach_mode:
-            self.get_logger().debug(f"🔥 No stable fire: detected={fire_detected}, stable={stable_fire_detected}, buffer_sum={sum(self.fire_detected_buffer)}")
+        elif not stable_fire_detected and fire_detected and not self.suppression_mode and not self.approach_mode:
+            # Respond to unstable fire detection - might become stable
+            self.get_logger().info("🔥 Unstable fire detected, entering approach mode (hoping it becomes stable)")
+            self.approach_mode = True
+            self.locked_angle = self.current_obs[3]
+            self.suppression_mode_pub.publish(Bool(data=False))
+            self.vla_pub.publish(Bool(data=False))
+            self.approach_lost_since = None
+        elif not fire_detected and not self.suppression_mode and not self.approach_mode:
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_no_fire_log', 0) >= 10.0:
+                self.get_logger().debug(f"🔥 No fire detected: detected={fire_detected}, stable={stable_fire_detected}, buffer_sum={sum(self.fire_detected_buffer)}")
+                self._last_no_fire_log = current_time
         elif self.approach_mode:
-            if stable_fire_detected and fire_distance <= self.suppression_distance:
-                self.get_logger().info("🟢 Fire reached suppression distance, stopping for 3 seconds to suppress")
-                self.escape_state = 'suppress'
-                self.escape_end_time = self.get_clock().now().nanoseconds / 1e9 + 3.0
-                # Randomly choose rotation direction after suppression
-                self.escape_rotation_side = self.turn_speed if np.random.random() > 0.5 else -self.turn_speed
-                self.vla_pub.publish(Bool(data=True))
-                self.detected_fire_positions = [pos for pos in self.detected_fire_positions if pos != current_fire_position]
+            if stable_fire_detected:
+                self.get_logger().info("🟢 Fire is stable, entering suppression mode")
                 self.approach_mode = False
-                self.suppression_mode = False
-                self.suppression_mode_pub.publish(Bool(data=False))
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0  # Stop completely during suppression
-                self.cmd_pub.publish(cmd)
+                self.suppression_mode = True
+                self.suppression_mode_pub.publish(Bool(data=True))
+                self.vla_pub.publish(Bool(data=False))
                 return
-            elif not stable_fire_detected:
+            elif not fire_detected:
+                # Only start grace timer if no fire detected at all
                 now = self.get_clock().now().nanoseconds / 1e9
                 if self.approach_lost_since is None:
                     self.approach_lost_since = now
-                    self.get_logger().debug(f"Approach detection lost, starting grace timer")
+                    if now - getattr(self, '_last_approach_lost_log', 0) >= 10.0:
+                        self.get_logger().debug(f"Approach detection lost, starting grace timer")
+                        self._last_approach_lost_log = now
                 elif now - self.approach_lost_since < self.approach_interrupt_timeout:
-                    self.get_logger().debug(f"Approach within grace period: {now - self.approach_lost_since:.2f}s")
+                    if now - getattr(self, '_last_approach_grace_log', 0) >= 10.0:
+                        self.get_logger().debug(f"Approach within grace period: {now - self.approach_lost_since:.2f}s")
+                        self._last_approach_grace_log = now
                 else:
                     self.get_logger().info("🟢 Fire lost during approach, exiting approach mode")
                     self.approach_mode = False
@@ -1079,13 +1231,57 @@ Mission Complete: {self.mission_complete}"""
                     self.vla_pub.publish(Bool(data=False))
                     self.approach_lost_since = None
             else:
+                # Fire detected but not stable - reset grace timer to be more tolerant
                 self.approach_lost_since = None
         elif self.suppression_mode:
-            if not stable_fire_detected or fire_distance > self.suppression_distance:
-                self.get_logger().info("🟢 Fire lost or too far, exiting suppression mode")
+            if not stable_fire_detected:
+                self.get_logger().info("🟢 Fire lost, exiting suppression mode")
                 self.suppression_mode = False
                 self.suppression_mode_pub.publish(Bool(data=False))
                 self.vla_pub.publish(Bool(data=False))
+                self.last_recenter_distance = None
+                self.recenter_checkpoints = []
+            elif fire_distance <= self.suppression_distance:
+                self.get_logger().info("🟢 Fire reached suppression distance, stopping for 3 seconds to suppress")
+                self.escape_state = 'suppress'
+                self.escape_end_time = self.get_clock().now().nanoseconds / 1e9 + 3.0
+                # Randomly choose rotation direction after suppression
+                self.escape_rotation_side = self.turn_speed if np.random.random() > 0.5 else -self.turn_speed
+                self.vla_pub.publish(Bool(data=True))
+                # Add suppressed fire to the list if not already there
+                if current_fire_position and current_fire_position not in self.suppressed_fire_positions:
+                    self.suppressed_fire_positions.append(current_fire_position)
+                    self.get_logger().info(f"📌 Recorded suppressed fire at {current_fire_position}")
+                self.approach_mode = False
+                self.suppression_mode = False
+                self.suppression_mode_pub.publish(Bool(data=False))
+                cmd = Twist()
+                cmd.linear.x = 0.0
+                cmd.angular.z = 0.0  # Stop completely during suppression
+                self.cmd_pub.publish(cmd)
+                self.last_recenter_distance = None
+                self.recenter_checkpoints = []
+                return
+            elif fire_distance > self.suppression_distance:
+                # Recentering logic in suppression mode
+                if self.last_recenter_distance is None:
+                    self.last_recenter_distance = fire_distance
+                    self.recenter_checkpoints = [fire_distance * (2/3), fire_distance * (1/3)]
+                if self.recenter_checkpoints and fire_distance <= self.recenter_checkpoints[0]:
+                    # Log suppression recentering every 3 seconds to reduce spam
+                    current_time = self.get_clock().now().nanoseconds / 1e9
+                    if not hasattr(self, '_last_suppression_recenter_log') or current_time - self._last_suppression_recenter_log >= 3.0:
+                        self.get_logger().info(f"🔄 Recentering to fire at distance {fire_distance:.2f}")
+                        self._last_suppression_recenter_log = current_time
+                    angle_to_fire = self.current_obs[3]
+                    if abs(angle_to_fire) > self.angle_threshold:
+                        twist = Twist()
+                        twist.linear.x = 0.0
+                        twist.angular.z = (self.turn_speed * 0.5) if angle_to_fire > 0 else -(self.turn_speed * 0.5)
+                        self.cmd_pub.publish(twist)
+                        return
+                    self.recenter_checkpoints.pop(0)
+                # Continue navigating towards fire
 
         action, action_name, cmd = self.select_rl_action()
         
@@ -1094,21 +1290,44 @@ Mission Complete: {self.mission_complete}"""
             action_name = f"SEARCH_{action_name}"
         
         if self.post_avoid_recenter and (self.lidar_ranges is None or float(np.min(self.lidar_ranges)) >= self.min_safe_distance):
+            # Check for recentering timeout (5 seconds max)
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if not hasattr(self, 'recenter_start_time'):
+                self.recenter_start_time = current_time
+            elif current_time - self.recenter_start_time > 5.0:
+                current_time_check = self.get_clock().now().nanoseconds / 1e9
+                if current_time_check - getattr(self, '_last_recenter_timeout_warn', 0) >= 10.0:
+                    self.get_logger().warn("⏰ RECENTERING TIMEOUT: Giving up recentering after 5 seconds")
+                    self._last_recenter_timeout_warn = current_time_check
+                self.post_avoid_recenter = False
+                delattr(self, 'recenter_start_time')
+                return
+
             angle_to_fire = self.current_obs[3] if (self.current_obs is not None and len(self.current_obs) >= 4) else 0.0
             if abs(angle_to_fire) > self.angle_threshold:
                 rec_cmd = Twist()
                 rec_cmd.linear.x = 0.0
                 rec_cmd.angular.z = -self.turn_speed if angle_to_fire > 0 else self.turn_speed
                 self.cmd_pub.publish(rec_cmd)
-                self.get_logger().info(f"↪ Recentering toward fire: angle={angle_to_fire:.2f}")
+                # Log recentering every 3 seconds to reduce spam
+                if not hasattr(self, '_last_recenter_log') or current_time - self._last_recenter_log >= 3.0:
+                    self.get_logger().info(f"↪ Recentering toward fire: angle={angle_to_fire:.2f}")
+                    self._last_recenter_log = current_time
                 return
             else:
                 self.post_avoid_recenter = False
+                if hasattr(self, 'recenter_start_time'):
+                    delattr(self, 'recenter_start_time')
 
         self.cmd_pub.publish(cmd)
-        self.get_logger().info(
-            f"🤖 Action: {action_name} | linear.x: {cmd.linear.x:.2f} | angular.z: {cmd.angular.z:.2f}"
-        )
+        
+        # Log action status every 3 seconds to reduce spam
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        if not hasattr(self, '_last_action_log') or current_time - self._last_action_log >= 3.0:
+            self.get_logger().info(
+                f"🤖 Action: {action_name} | linear.x: {cmd.linear.x:.2f} | angular.z: {cmd.angular.z:.2f}"
+            )
+            self._last_action_log = current_time
 
         if self.previous_obs is not None:
             adjusted_reward = self.reward
@@ -1116,7 +1335,10 @@ Mission Complete: {self.mission_complete}"""
                 adjusted_reward += self.action_repeat_penalty
                 self.stuck_counter += 1
                 if self.stuck_counter % 10 == 0:
-                    self.get_logger().warn("🔄 Circular movement detected - applying penalty")
+                    current_time = self.get_clock().now().nanoseconds / 1e9
+                    if current_time - getattr(self, '_last_circular_warn', 0) >= 10.0:
+                        self.get_logger().warn("🔄 Circular movement detected - applying penalty")
+                        self._last_circular_warn = current_time
             else:
                 self.stuck_counter = max(0, self.stuck_counter - 1)
 
@@ -1124,7 +1346,10 @@ Mission Complete: {self.mission_complete}"""
                 if action is not None and 0 <= action < self.action_size:
                     self.agent.memory.push(self.previous_obs, action, adjusted_reward, self.current_obs, self.done)
                 else:
-                    self.get_logger().debug(f"Invalid action index: {action}, skipping memory push.")
+                    current_time = self.get_clock().now().nanoseconds / 1e9
+                    if current_time - getattr(self, '_last_invalid_action_log', 0) >= 10.0:
+                        self.get_logger().debug(f"Invalid action index: {action}, skipping memory push.")
+                        self._last_invalid_action_log = current_time
 
             if self.mode == 'train_online':
                 loss = self.agent.train_step()

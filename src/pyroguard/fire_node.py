@@ -63,7 +63,10 @@ class YOLOv8FireDetectionNode(Node):
         self.fire_distance_history.append(self.fire_distance)
 
     def suppressed_fire_callback(self, msg):
-        self.get_logger().debug("Received /suppressed_fires (Float32MultiArray) - ignoring to avoid coord mixing")
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        if current_time - getattr(self, '_last_suppressed_fires_log', 0) >= 10.0:
+            self.get_logger().debug("Received /suppressed_fires (Float32MultiArray) - ignoring to avoid coord mixing")
+            self._last_suppressed_fires_log = current_time
 
     def fire_position_callback(self, msg: PointStamped):
         try:
@@ -87,7 +90,10 @@ class YOLOv8FireDetectionNode(Node):
         self.suppressed_world_positions = [p for p in self.suppressed_world_positions if now - p[2] <= self.suppressed_ttl]
         after = len(self.suppressed_world_positions)
         if before != after:
-            self.get_logger().debug(f"Pruned suppressed_world_positions: {before} -> {after}")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_prune_log', 0) >= 10.0:
+                self.get_logger().debug(f"Pruned suppressed_world_positions: {before} -> {after}")
+                self._last_prune_log = current_time
 
     def load_model(self, model_path):
         try:
@@ -204,10 +210,13 @@ class YOLOv8FireDetectionNode(Node):
         self.vla_pub.publish(msg_out)
 
         inf_time = (self.get_clock().now() - start_time).nanoseconds / 1e9
-        if fire_detected > 0.5:
-            self.get_logger().info(f"[DEBUG] Inference time: {inf_time:.3f}s | Published VLA output: {msg_out.data}")
-        else:
-            self.get_logger().warning(f"[DEBUG] Inference time: {inf_time:.3f}s | Published default VLA output (no fire detected): {msg_out.data}")
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        if current_time - getattr(self, '_last_inference_log', 0) >= 10.0:
+            if fire_detected > 0.5:
+                self.get_logger().debug(f"[DEBUG] Inference time: {inf_time:.3f}s | Published VLA output: {msg_out.data}")
+            else:
+                self.get_logger().debug(f"[DEBUG] Inference time: {inf_time:.3f}s | Published default VLA output (no fire detected): {msg_out.data}")
+            self._last_inference_log = current_time
 
     def is_same_fire(self, pos1, pos2, threshold=0.05):
         return abs(pos1[0] - pos2[0]) < threshold and abs(pos1[1] - pos2[1]) < threshold

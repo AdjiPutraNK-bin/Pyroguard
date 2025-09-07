@@ -76,7 +76,10 @@ class MapCoverageNode(Node):
 
     def save_map_with_fires(self):
         if self.current_map is None:
-            self.get_logger().warning("No map available to save")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_no_map_warn', 0) >= 10.0:
+                self.get_logger().warning("No map available to save")
+                self._last_no_map_warn = current_time
             return
         
         # Convert occupancy grid to image

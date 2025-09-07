@@ -73,13 +73,22 @@ class FireSuppressionHandler(Node):
             return
         current_time = self.get_clock().now()
         if (current_time - self.last_suppression_time).nanoseconds < 3e9:
-            self.get_logger().warn("Trigger ignored - too frequent")
+            current_time_ns = self.get_clock().now().nanoseconds / 1e9
+            if current_time_ns - getattr(self, '_last_frequent_trigger_warn', 0) >= 10.0:
+                self.get_logger().warn("Trigger ignored - too frequent")
+                self._last_frequent_trigger_warn = current_time_ns
             return
         if self.odom is None:
-            self.get_logger().warning("Trigger received but missing odometry data")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_missing_odom_warn', 0) >= 10.0:
+                self.get_logger().warning("Trigger received but missing odometry data")
+                self._last_missing_odom_warn = current_time
             return
         if self.current_fire_position is None:
-            self.get_logger().warning("No current fire position available for suppression")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_no_fire_pos_warn', 0) >= 10.0:
+                self.get_logger().warning("No current fire position available for suppression")
+                self._last_no_fire_pos_warn = current_time
             return
         self.get_logger().info("Trigger received - attempting suppression", throttle_duration_sec=2.0)
         self.select_and_suppress_fire()

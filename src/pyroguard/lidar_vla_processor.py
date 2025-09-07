@@ -67,7 +67,10 @@ class LidarVlaProcessorNode(Node):
             self.lidar_angle_increment = msg.angle_increment
             finite_ranges = self.lidar_ranges[np.isfinite(self.lidar_ranges)]
             self.lidar_min_distance = float(np.min(finite_ranges)) if len(finite_ranges) > 0 else float('inf')
-            self.get_logger().debug(f"LIDAR min_distance: {self.lidar_min_distance:.2f}m")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_lidar_min_log', 0) >= 10.0:
+                self.get_logger().debug(f"LIDAR min_distance: {self.lidar_min_distance:.2f}m")
+                self._last_lidar_min_log = current_time
         except Exception as e:
             self.get_logger().error(f"LIDAR callback failed: {str(e)}")
             self.lidar_ranges = None
@@ -96,7 +99,7 @@ class LidarVlaProcessorNode(Node):
         bbox_x = self.vla_data[3]
         normalized_x = bbox_x - 0.5
         angle_to_fire = normalized_x * (self.camera_fov_rad / 2)
-        return angle_to_fire
+        return -angle_to_fire
 
     def quaternion_to_yaw(self, q):
         try:
@@ -109,7 +112,10 @@ class LidarVlaProcessorNode(Node):
 
     def publish_observation(self):
         if self.vla_data is None or self.lidar_ranges is None or not np.any(np.isfinite(self.lidar_ranges)):
-            self.get_logger().warning("Missing VLA or LIDAR data, skipping observation")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_missing_data_warn', 0) >= 10.0:
+                self.get_logger().warning("Missing VLA or LIDAR data, skipping observation")
+                self._last_missing_data_warn = current_time
             return
 
         fire_or_no = self.vla_data[0]
@@ -138,7 +144,10 @@ class LidarVlaProcessorNode(Node):
         now = self.get_clock().now().nanoseconds / 1e9
         if fire_or_no > 0.5 and fire_distance != float('inf') and self.robot_pose is not None:
             if fire_distance > self.max_fire_distance:
-                self.get_logger().debug(f"Clamping fire_distance {fire_distance:.2f} to max {self.max_fire_distance:.2f}")
+                current_time = self.get_clock().now().nanoseconds / 1e9
+                if current_time - getattr(self, '_last_clamp_log', 0) >= 10.0:
+                    self.get_logger().debug(f"Clamping fire_distance {fire_distance:.2f} to max {self.max_fire_distance:.2f}")
+                    self._last_clamp_log = current_time
                 fire_distance = self.max_fire_distance
 
             self._stable_counter += 1
@@ -147,24 +156,32 @@ class LidarVlaProcessorNode(Node):
                 try:
                     rx, ry = self.robot_pose.position.x, self.robot_pose.position.y
                     yaw = self.quaternion_to_yaw(self.robot_pose.orientation)
-                    fx = rx + fire_distance * math.cos(yaw + angle_to_fire)
-                    fy = ry + fire_distance * math.sin(yaw + angle_to_fire)
-                    fz = 1.0
-                    point_msg = PointStamped()
-                    point_msg.header.stamp = self.get_clock().now().to_msg()
-                    point_msg.header.frame_id = 'map'
-                    point_msg.point.x = fx
-                    point_msg.point.y = fy
-                    point_msg.point.z = fz
-                    self.fire_position_pub.publish(point_msg)
-                    self._last_fire_publish_time = now
-                    self._last_published_distance = fire_distance
+                    
+                    # Validate inputs to prevent RuntimeWarning
+                    if not (math.isfinite(yaw) and math.isfinite(angle_to_fire) and math.isfinite(fire_distance) and fire_distance >= 0):
+                        self.get_logger().debug(f"Invalid fire position data: yaw={yaw}, angle={angle_to_fire}, dist={fire_distance}")
+                    else:
+                        fx = rx + fire_distance * math.cos(yaw + angle_to_fire)
+                        fy = ry + fire_distance * math.sin(yaw + angle_to_fire)
+                        fz = 1.0
+                        point_msg = PointStamped()
+                        point_msg.header.stamp = self.get_clock().now().to_msg()
+                        point_msg.header.frame_id = 'map'
+                        point_msg.point.x = fx
+                        point_msg.point.y = fy
+                        point_msg.point.z = fz
+                        self.fire_position_pub.publish(point_msg)
+                        self._last_fire_publish_time = now
+                        self._last_published_distance = fire_distance
                     self.get_logger().info(f"Published fire position: ({fx:.2f}, {fy:.2f}, {fz:.2f})")
                     self._stable_counter = self.fire_stable_frames
                 except Exception as e:
                     self.get_logger().error(f"Error publishing fire position: {str(e)}")
             elif not publish_allowed:
-                self.get_logger().debug("Fire position publish skipped due to rate limit")
+                current_time = self.get_clock().now().nanoseconds / 1e9
+                if current_time - getattr(self, '_last_rate_limit_log', 0) >= 10.0:
+                    self.get_logger().debug("Fire position publish skipped due to rate limit")
+                    self._last_rate_limit_log = current_time
         else:
             self._stable_counter = 0
 

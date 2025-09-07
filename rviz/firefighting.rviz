@@ -10,12 +10,20 @@ Visualization Manager:
       Name: Suppressed Fire Markers
       Topic: /suppressed_fire_markers
       Value: True
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Fire Markers
+      Topic: /fire_markers
+      Value: True
+    - Class: rviz_default_plugins/Marker
+      Name: Mission Status
+      Topic: /mission_status_marker
+      Value: True
     - Class: rviz_default_plugins/LaserScan
       Name: LaserScan
       Topic: /world/forest_world/model/turtlebot4/link/lidar_link/sensor/lidar/scan
       Size (m): 0.05
       Color: 255; 0; 0
-      Queue Size: 100  # Added
+      Queue Size: 10
       Value: True
     - Class: rviz_default_plugins/Image
       Name: Camera

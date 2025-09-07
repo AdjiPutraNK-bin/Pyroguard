@@ -66,7 +66,9 @@ class TestNavigationNode(Node):
 
         current_time = self.get_clock().now().nanoseconds / 1e9
         if current_time - self.test_start_time > self.test_timeout:
-            self.get_logger().warning(f"Test {self.current_test + 1} timed out")
+            if current_time - getattr(self, '_last_test_timeout_warn', 0) >= 10.0:
+                self.get_logger().warning(f"Test {self.current_test + 1} timed out")
+                self._last_test_timeout_warn = current_time
             self.next_test()
             return
 

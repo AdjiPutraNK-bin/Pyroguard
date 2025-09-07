@@ -310,9 +310,9 @@ def generate_launch_description():
                     {'epsilon_end': 0.05},
                     {'epsilon_decay': 1000},
                     {'save_interval': 1000},
-                    {'min_safe_distance': 0.2},
+                    {'min_safe_distance': 0.3},
                     {'action_repeat_penalty': -0.5},
-                    {'avoidance_timeout': 3.0},
+                    {'avoidance_timeout': 2.0},
                 ]
             ),
             Node(

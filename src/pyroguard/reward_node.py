@@ -81,7 +81,10 @@ class RewardNode(Node):
         done = False
 
         if self.lidar_ranges is None or self.robot_pose is None:
-            self.get_logger().warning("Missing LIDAR or odometry data, publishing zero reward")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - getattr(self, '_last_missing_reward_data_warn', 0) >= 10.0:
+                self.get_logger().warning("Missing LIDAR or odometry data, publishing zero reward")
+                self._last_missing_reward_data_warn = current_time
             self.reward_pub.publish(Float32(data=0.0))
             self.done_pub.publish(Bool(data=False))
             return
@@ -107,9 +110,14 @@ class RewardNode(Node):
 
             # Alignment penalty
             yaw = self.quaternion_to_yaw(self.robot_pose.orientation)
-            fire_angle = math.atan2(dy, dx) - yaw
-            fire_angle = self.normalize_angle(fire_angle)
-            reward -= self.alignment_penalty_scale * abs(fire_angle)
+            
+            # Validate inputs to prevent RuntimeWarning
+            if not (math.isfinite(dx) and math.isfinite(dy) and math.isfinite(yaw)):
+                self.get_logger().debug(f"Invalid alignment data: dx={dx}, dy={dy}, yaw={yaw}")
+            else:
+                fire_angle = math.atan2(dy, dx) - yaw
+                fire_angle = self.normalize_angle(fire_angle)
+                reward -= self.alignment_penalty_scale * abs(fire_angle)
 
             # Suppression reward
             if fire_distance <= self.suppression_distance and self.suppression_mode:
