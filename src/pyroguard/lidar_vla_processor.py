@@ -67,6 +67,7 @@ class LidarVlaProcessorNode(Node):
             self.lidar_angle_increment = msg.angle_increment
             finite_ranges = self.lidar_ranges[np.isfinite(self.lidar_ranges)]
             self.lidar_min_distance = float(np.min(finite_ranges)) if len(finite_ranges) > 0 else float('inf')
+            self.get_logger().debug(f"LIDAR min_distance: {self.lidar_min_distance:.2f}m")
         except Exception as e:
             self.get_logger().error(f"LIDAR callback failed: {str(e)}")
             self.lidar_ranges = None
@@ -94,7 +95,7 @@ class LidarVlaProcessorNode(Node):
             return 0.0
         bbox_x = self.vla_data[3]
         normalized_x = bbox_x - 0.5
-        angle_to_fire = -normalized_x * (self.camera_fov_rad / 2)
+        angle_to_fire = normalized_x * (self.camera_fov_rad / 2)
         return angle_to_fire
 
     def quaternion_to_yaw(self, q):

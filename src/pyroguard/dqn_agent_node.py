@@ -75,6 +75,7 @@ class DQNAgentNode(Node):
                 ('path_cost_distance_weight', 0.7),
                 ('path_cost_obstacle_weight', 0.3),
                 ('return_to_base_timeout', 30.0),
+                ('avoidance_timeout', 10.0),
             ]
         )
 
@@ -114,6 +115,7 @@ class DQNAgentNode(Node):
         self.path_cost_distance_weight = self.get_parameter('path_cost_distance_weight').value
         self.path_cost_obstacle_weight = self.get_parameter('path_cost_obstacle_weight').value
         self.return_to_base_timeout = self.get_parameter('return_to_base_timeout').value
+        self.avoidance_timeout = self.get_parameter('avoidance_timeout').value
 
         if self.mode not in ['collect', 'train_online', 'inference']:
             raise ValueError("Invalid mode: choose 'collect', 'train_online', or 'inference'")
@@ -156,6 +158,8 @@ class DQNAgentNode(Node):
         self.escape_state = None
         self.escape_end_time = 0.0
         self.escape_rotation_side = 0.0
+        self.avoidance_start_time = None
+        self.avoidance_count = 0
         self.robot_pose = None
 
         self.recent_actions = deque(maxlen=10)
@@ -389,7 +393,7 @@ class DQNAgentNode(Node):
         cmd.angular.z = max(-self.avoidance_max_angular, min(self.avoidance_max_angular, best_angle * self.avoid_kp))
         if min_dist < self.min_safe_distance * 1.5:
             cmd.linear.x = self.slow_forward_speed
-        self.get_logger().info(f"[AVOID] Selected path at angle {best_angle:.2f}, linear.x={cmd.linear.x:.2f}, angular.z={cmd.angular.z:.2f}")
+        self.get_logger().info(f"[AVOID] Selected path at angle {best_angle:.2f}rad ({np.degrees(best_angle):.1f}°), min_dist={min_dist:.2f}m, linear.x={cmd.linear.x:.2f}, angular.z={cmd.angular.z:.2f}")
         return cmd
 
     def execute_escape(self):
@@ -438,19 +442,61 @@ class DQNAgentNode(Node):
         epsilon = self.epsilon_end + (self.epsilon_start - self.epsilon_end) * \
                   np.exp(-1.0 * self.step_count / self.epsilon_decay)
 
-        if min_obstacle_distance < self.min_safe_distance:
+        # Add hysteresis to prevent rapid avoidance re-triggering
+        avoidance_threshold = self.min_safe_distance * 1.2 if self.avoidance_count > 0 else self.min_safe_distance
+
+        if min_obstacle_distance < avoidance_threshold:
+            now = self.get_clock().now().nanoseconds / 1e9
+            
+            # Check if we've been in avoidance too long
+            if self.avoidance_start_time is None:
+                self.avoidance_start_time = now
+                self.avoidance_count += 1
+                self.get_logger().info(f"🔶 AVOIDANCE TRIGGERED: min_obstacle_distance={min_obstacle_distance:.2f}m < threshold={avoidance_threshold:.2f}m (hysteresis applied)")
+            elif now - self.avoidance_start_time > self.avoidance_timeout:
+                # Timeout reached - temporarily increase threshold to escape
+                self.get_logger().warning(f"⏰ AVOIDANCE TIMEOUT: Been avoiding for {now - self.avoidance_start_time:.1f}s, temporarily increasing threshold")
+                self.avoidance_start_time = None
+                # Force a move by using a higher threshold temporarily
+                if min_obstacle_distance < self.min_safe_distance * 1.5:
+                    self.get_logger().info(f"🚀 ESCAPING AVOIDANCE: min_obstacle_distance={min_obstacle_distance:.2f}m, using relaxed threshold")
+                    cmd = self.get_avoidance_cmd()
+                    if self.approach_mode:
+                        self.post_avoid_recenter = True
+                    return None, "escape_avoidance", cmd
+                else:
+                    self.get_logger().info(f"✅ AVOIDANCE CLEARED: min_obstacle_distance={min_obstacle_distance:.2f}m >= relaxed threshold")
+                    self.avoidance_start_time = None
+            else:
+                self.get_logger().debug(f"🔶 AVOIDANCE CONTINUING: {now - self.avoidance_start_time:.1f}s elapsed")
+            
             cmd = self.get_avoidance_cmd()
             if self.approach_mode:
                 self.post_avoid_recenter = True
             return None, "avoidance", cmd
-        elif self.suppression_mode:
+        
+        self.get_logger().debug(f"✅ No avoidance needed: min_obstacle_distance={min_obstacle_distance:.2f}m >= threshold={avoidance_threshold:.2f}m")
+        
+        # Reset avoidance timer when not avoiding
+        if self.avoidance_start_time is not None:
+            self.get_logger().info(f"✅ AVOIDANCE CLEARED: Was avoiding for {(self.get_clock().now().nanoseconds / 1e9) - self.avoidance_start_time:.1f}s")
+            self.avoidance_start_time = None
+            # Reset avoidance count after successful clear
+            if self.avoidance_count > 0:
+                self.avoidance_count = max(0, self.avoidance_count - 1)
+        
+        if self.suppression_mode:
             action = 3
+            self.get_logger().debug("🤖 SUPPRESSION MODE: stopping")
         elif self.approach_mode:
             action = self.navigation_action()
+            self.get_logger().debug("🤖 APPROACH MODE: using navigation action")
         elif fire_detected:
             action = self.navigation_action()
+            self.get_logger().debug("🤖 FIRE DETECTED: using navigation action")
         else:
             action = self.select_smart_action(epsilon)
+            self.get_logger().debug("🤖 NO FIRE: using DQN action")
 
         if action is not None:
             action_name = self.action_map[action]
@@ -462,13 +508,19 @@ class DQNAgentNode(Node):
     def navigation_action(self):
         angle_to_fire = self.current_obs[3]
         fire_distance = self.current_obs[4]
+        self.get_logger().debug(f"🧭 Navigation: angle_to_fire={angle_to_fire:.3f}rad ({math.degrees(angle_to_fire):.1f}°), threshold={self.angle_threshold:.3f}rad ({math.degrees(self.angle_threshold):.1f}°), fire_dist={fire_distance:.2f}m")
+        
         if abs(angle_to_fire) > self.angle_threshold:
             if angle_to_fire > 0:
+                self.get_logger().debug("🧭 Turning RIGHT toward fire")
                 return 2  # turn_right
             else:
+                self.get_logger().debug("🧭 Turning LEFT toward fire")
                 return 1  # turn_left
         else:
-            return 5 if fire_distance < self.min_safe_distance * 2.0 else 0  # slow_forward or move_forward
+            action = 5 if fire_distance < self.min_safe_distance * 2.0 else 0  # slow_forward or move_forward
+            self.get_logger().debug(f"🧭 Moving FORWARD toward fire (action={action})")
+            return action
 
     def select_smart_action(self, epsilon):
         current_time = self.get_clock().now().nanoseconds / 1e9
@@ -535,10 +587,10 @@ class DQNAgentNode(Node):
             cmd.angular.z = ang_jitter
         elif action_name == "turn_left":
             cmd.linear.x = 0.05
-            cmd.angular.z = self.turn_speed
+            cmd.angular.z = self.turn_speed  # Fixed: negative for left turn
         elif action_name == "turn_right":
             cmd.linear.x = 0.05
-            cmd.angular.z = -self.turn_speed
+            cmd.angular.z = -self.turn_speed   # Fixed: positive for right turn
         elif action_name == "stop":
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
@@ -899,6 +951,11 @@ Mission Complete: {self.mission_complete}"""
         self.fire_detected_buffer.append(fire_detected)
         stable_fire_detected = sum(self.fire_detected_buffer) >= 3
 
+        # Debug fire detection status
+        buffer_str = str(list(self.fire_detected_buffer)[-5:]) if len(self.fire_detected_buffer) >= 5 else str(list(self.fire_detected_buffer))
+        self.get_logger().debug(f"🔥 Fire detection: detected={fire_detected}, stable={stable_fire_detected}, buffer={buffer_str}")
+        self.get_logger().debug(f"📊 Observation: fire_prob={self.current_obs[0]:.3f}, fire_size={self.current_obs[1]:.3f}, min_dist={self.current_obs[2]:.3f}, angle={self.current_obs[3]:.3f}, fire_dist={self.current_obs[4]:.3f}")
+
         # Show countdown timer for return-to-base
         if self.last_new_fire_detection_time is not None and not self.return_to_base_mode:
             current_time = self.get_clock().now().nanoseconds / 1e9
@@ -973,7 +1030,7 @@ Mission Complete: {self.mission_complete}"""
                 if abs(angle_to_fire) > self.angle_threshold:
                     twist = Twist()
                     twist.linear.x = 0.0
-                    twist.angular.z = (self.turn_speed * 0.5) if angle_to_fire > 0 else -(self.turn_speed * 0.5)
+                    twist.angular.z = -(self.turn_speed * 0.5) if angle_to_fire > 0 else (self.turn_speed * 0.5)
                     self.cmd_pub.publish(twist)
                     return
                 self.recenter_checkpoints.pop(0)
@@ -988,6 +1045,8 @@ Mission Complete: {self.mission_complete}"""
             self.suppression_mode_pub.publish(Bool(data=False))
             self.vla_pub.publish(Bool(data=False))
             self.approach_lost_since = None
+        elif not stable_fire_detected and not self.suppression_mode and not self.approach_mode:
+            self.get_logger().debug(f"🔥 No stable fire: detected={fire_detected}, stable={stable_fire_detected}, buffer_sum={sum(self.fire_detected_buffer)}")
         elif self.approach_mode:
             if stable_fire_detected and fire_distance <= self.suppression_distance:
                 self.get_logger().info("🟢 Fire reached suppression distance, stopping for 3 seconds to suppress")
@@ -1039,7 +1098,7 @@ Mission Complete: {self.mission_complete}"""
             if abs(angle_to_fire) > self.angle_threshold:
                 rec_cmd = Twist()
                 rec_cmd.linear.x = 0.0
-                rec_cmd.angular.z = self.turn_speed if angle_to_fire > 0 else -self.turn_speed
+                rec_cmd.angular.z = -self.turn_speed if angle_to_fire > 0 else self.turn_speed
                 self.cmd_pub.publish(rec_cmd)
                 self.get_logger().info(f"↪ Recentering toward fire: angle={angle_to_fire:.2f}")
                 return

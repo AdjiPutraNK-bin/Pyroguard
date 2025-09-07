@@ -266,7 +266,10 @@ def generate_launch_description():
                 executable='lidar_vla_processor_node',
                 name='lidar_vla_processor_node',
                 output='screen',
-                parameters=[{'use_sim_time': use_sim_time}]
+                parameters=[
+                    {'use_sim_time': use_sim_time},
+                    {'min_safe_distance': 0.3}
+                ]
             ),
             Node(
                 package='pyroguard',
@@ -280,7 +283,10 @@ def generate_launch_description():
                 executable='reward_node',
                 name='reward_node',
                 output='screen',
-                parameters=[{'use_sim_time': use_sim_time}]
+                parameters=[
+                    {'use_sim_time': use_sim_time},
+                    {'min_safe_distance': 0.3}
+                ]
             ),
             Node(
                 package='pyroguard',
@@ -300,6 +306,13 @@ def generate_launch_description():
                     {'obs_size': 5},
                     {'action_size': 6},
                     {'model_path': 'dqn_model.pth'},
+                    {'epsilon_start': 0.9},
+                    {'epsilon_end': 0.05},
+                    {'epsilon_decay': 1000},
+                    {'save_interval': 1000},
+                    {'min_safe_distance': 0.2},
+                    {'action_repeat_penalty': -0.5},
+                    {'avoidance_timeout': 3.0},
                 ]
             ),
             Node(

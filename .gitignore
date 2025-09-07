@@ -1,1 +1,22 @@
-models/pytorch_deeplabv3_fire_segmentation .pth
+build/
+install/
+log/
+*.pyc
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.pth
+*.pt
+*.onnx
+*.h5
+*.pb
+*.tflite
+models/*.pth
+models/*.pt
